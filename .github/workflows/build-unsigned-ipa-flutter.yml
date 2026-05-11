@@ -31,16 +31,32 @@ jobs:
       - name: Flutter doctor
         run: flutter doctor -v
 
-      - name: Generate platform scaffolding
-        # `flutter create .` is idempotent: it ONLY adds missing files and does
-        # not overwrite our pubspec.yaml, lib/, ios/Runner/AppDelegate.swift,
-        # ios/Podfile, or assets.
+      - name: Stash custom iOS overrides
+        # `flutter create .` will not generate a complete iOS project (no
+        # Runner.xcodeproj, no ios/Flutter/*.xcconfig) if the ios/ directory
+        # already partially exists. Move our overrides aside, fully scaffold,
+        # then restore them on top of the generated project.
+        run: |
+          mkdir -p ../_overrides
+          mv ios ../_overrides/ios
+          ls ../_overrides/ios
+
+      - name: Generate full Flutter project (ios platform)
         run: |
           flutter create \
             --org com.bboxfix \
             --project-name barcode_scanner_flutter \
             --platforms=ios \
             .
+          echo '--- generated ios/ tree ---'
+          find ios -maxdepth 3 -print
+
+      - name: Restore custom iOS overrides on top of scaffolding
+        run: |
+          # Overlay AppDelegate.swift and Podfile from our stash.
+          cp ../_overrides/ios/Runner/AppDelegate.swift ios/Runner/AppDelegate.swift
+          cp ../_overrides/ios/Podfile ios/Podfile
+          ls ios/Runner
 
       - name: Patch Info.plist (camera permission + portrait only)
         run: |
@@ -56,6 +72,11 @@ jobs:
 
       - name: Flutter pub get
         run: flutter pub get
+
+      - name: Generate ios/Flutter/Generated.xcconfig
+        # `pod install` requires Generated.xcconfig. It is produced by
+        # `flutter build ios --config-only`, NOT by `flutter pub get`.
+        run: flutter build ios --config-only --no-codesign --release
 
       - name: Pod install
         run: |
