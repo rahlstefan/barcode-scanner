@@ -18,18 +18,14 @@ import {
 import { useTensorflowModel } from 'react-native-fast-tflite';
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import { Worklets } from 'react-native-worklets-core';
-import { bundleDirectory } from 'expo-file-system/legacy';
+import {
+  bundleDirectory,
+  cacheDirectory,
+  copyAsync,
+  getInfoAsync,
+} from 'expo-file-system/legacy';
 import { TemporalDetectionBuffer } from './src/utils/TemporalDetectionBuffer';
 import { Detection, SmoothedDetection } from './src/types';
-
-// На iOS в Release модель лежит в бандле приложения.
-// bundleDirectory = "file:///.../.../BarcodeScanner.app/" (с trailing /).
-// Metro кладёт ассеты в assets/assets/models/yolo.tflite внутри бандла.
-// На Android / Dev-билде require() работает нативно через Metro.
-const MODEL_SOURCE =
-  Platform.OS === 'ios' && bundleDirectory
-    ? { url: `${bundleDirectory}assets/assets/models/yolo.tflite` }
-    : (require('./assets/models/yolo.tflite') as number);
 
 const MODEL_INPUT_SIZE = 320;
 const SCORE_THRESHOLD = 0.4;
@@ -49,7 +45,77 @@ export default function App() {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
 
-  const model = useTensorflowModel(MODEL_SOURCE);
+  const [modelSourceReady, setModelSourceReady] = useState(
+    Platform.OS !== 'ios'
+  );
+  const [modelSourceError, setModelSourceError] = useState<string | null>(null);
+  const [modelSource, setModelSource] = useState<number | { url: string }>(() =>
+    Platform.OS === 'ios' ? { url: '' } : (require('./assets/models/yolo.tflite') as number)
+  );
+
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+
+    let cancelled = false;
+    const resolveModelSource = async () => {
+      try {
+        if (!bundleDirectory) {
+          throw new Error('bundleDirectory недоступен');
+        }
+
+        // В разных сборках Metro может положить файл в разные подпапки.
+        const candidates = [
+          `${bundleDirectory}assets/assets/models/yolo.tflite`,
+          `${bundleDirectory}assets/models/yolo.tflite`,
+          `${bundleDirectory}yolo.tflite`,
+        ];
+
+        let sourceInBundle: string | null = null;
+        for (const uri of candidates) {
+          const info = await getInfoAsync(uri);
+          if (info.exists) {
+            sourceInBundle = uri;
+            break;
+          }
+        }
+
+        if (!sourceInBundle) {
+          throw new Error(`Модель не найдена в bundle. Проверены пути: ${candidates.join(', ')}`);
+        }
+
+        // Читаем через cache URI: это надёжнее для нативной загрузки TFLite.
+        if (cacheDirectory) {
+          const cacheUri = `${cacheDirectory}yolo-runtime.tflite`;
+          await copyAsync({ from: sourceInBundle, to: cacheUri });
+          const copied = await getInfoAsync(cacheUri);
+          if (copied.exists) {
+            if (!cancelled) {
+              setModelSource({ url: cacheUri });
+              setModelSourceReady(true);
+            }
+            return;
+          }
+        }
+
+        if (!cancelled) {
+          setModelSource({ url: sourceInBundle });
+          setModelSourceReady(true);
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setModelSourceError(String(e?.message ?? e));
+          setModelSourceReady(true);
+        }
+      }
+    };
+
+    resolveModelSource();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const model = useTensorflowModel(modelSource);
   const { resize } = useResizePlugin();
 
   const [detections, setDetections] = useState<SmoothedDetection[]>([]);
@@ -226,7 +292,16 @@ export default function App() {
     );
   }
 
-  if (model.state === 'loading') {
+  if (modelSourceError) {
+    return (
+      <View style={styles.center}>
+        <Text style={[styles.statusText, { color: '#f44' }]}>Ошибка поиска модели:</Text>
+        <Text style={styles.errorText}>{modelSourceError}</Text>
+      </View>
+    );
+  }
+
+  if (!modelSourceReady || model.state === 'loading') {
     return (
       <View style={styles.center}>
         <ActivityIndicator color="#0f0" size="large" />
