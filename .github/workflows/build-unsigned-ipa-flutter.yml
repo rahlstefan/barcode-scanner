@@ -118,11 +118,11 @@ jobs:
           mkdir Payload
           cp -R "$APP_PATH" Payload/Runner.app
           # Sanity: model bundled?
-          if [ -f Payload/Runner.app/Frameworks/App.framework/flutter_assets/assets/models/best_int8.tflite ]; then
-            echo "Model size: $(stat -f%z Payload/Runner.app/Frameworks/App.framework/flutter_assets/assets/models/best_int8.tflite) bytes"
+          if [ -f Payload/Runner.app/Frameworks/App.framework/flutter_assets/assets/models/best_full_integer_quant.tflite ]; then
+            echo "Model size: $(stat -f%z Payload/Runner.app/Frameworks/App.framework/flutter_assets/assets/models/best_full_integer_quant.tflite) bytes"
           else
             echo "WARN: model not at expected path; listing flutter_assets:"
-            find Payload/Runner.app -name 'best_int8.tflite' -print || true
+            find Payload/Runner.app -name 'best_full_integer_quant.tflite' -print || true
           fi
           zip -qry DMTXScanner-unsigned.ipa Payload
           ls -la DMTXScanner-unsigned.ipa

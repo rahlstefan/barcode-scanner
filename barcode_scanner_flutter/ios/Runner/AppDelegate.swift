@@ -7,10 +7,17 @@ import Accelerate
 // =====================================================================
 //  DMTX Scanner — native iOS layer
 //  - AVFoundation capture (AVCaptureSession + AVCaptureVideoDataOutput)
-//  - TensorFlowLiteSwift int8 inference (YOLO26n, 320x320, single class)
+//  - TensorFlowLiteSwift FULL int8 inference
+//      model: best_full_integer_quant.tflite
+//      input  : int8  [1,320,320,3]  scale=1/255 zero=-128
+//      output : int8  [1,300,6]      scale~0.00412 zero=-124  (NMS embedded,
+//                                    layout: x1,y1,x2,y2,score,cls normalized)
 //  - Streams normalized detections to Flutter via EventChannel
 //  - Hosts camera preview as a Flutter PlatformView
 // =====================================================================
+
+fileprivate let kLogTag = "[DMTX]"
+fileprivate var kFrameLogEvery: Int = 30   // log a summary every N frames
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
@@ -23,6 +30,7 @@ import Accelerate
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
+    NSLog("\(kLogTag) ===== AppDelegate.didFinishLaunching =====")
     GeneratedPluginRegistrant.register(with: self)
     let controller = window?.rootViewController as! FlutterViewController
     let messenger = controller.binaryMessenger
@@ -30,9 +38,9 @@ import Accelerate
     // 1. Load TFLite model.
     do {
       detector = try YoloDetector()
-      NSLog("[DMTX] YOLO int8 model loaded OK")
+      NSLog("\(kLogTag) YOLO full-int8 model loaded OK")
     } catch {
-      NSLog("[DMTX] FAILED to load model: \(error)")
+      NSLog("\(kLogTag) FAILED to load model: \(error)")
     }
 
     // 2. EventChannel for detections.
@@ -67,9 +75,25 @@ import Accelerate
 
   // Called by the camera view on every frame.
   func handleSampleBuffer(_ pixelBuffer: CVPixelBuffer, frameId: Int) {
-    guard let det = detector else { return }
+    guard let det = detector else {
+      if frameId % kFrameLogEvery == 0 {
+        NSLog("\(kLogTag) frame=\(frameId) skipped — detector is nil")
+      }
+      return
+    }
+    let t0 = CACurrentMediaTime()
     let dets = det.run(pixelBuffer: pixelBuffer, frameId: frameId,
                        threshold: confidenceThreshold)
+    let dt = (CACurrentMediaTime() - t0) * 1000.0
+    if frameId % kFrameLogEvery == 0 {
+      NSLog(String(format: "\(kLogTag) frame=%d dets=%d thr=%.2f infer=%.1fms sink=%@",
+                   frameId, dets.count, Double(confidenceThreshold), dt,
+                   detectionsSink == nil ? "NIL" : "OK"))
+    } else if !dets.isEmpty {
+      NSLog(String(format: "\(kLogTag) frame=%d dets=%d top=%.2f infer=%.1fms",
+                   frameId, dets.count,
+                   Double((dets.first?["score"] as? Float) ?? 0), dt))
+    }
     if let sink = detectionsSink {
       DispatchQueue.main.async { sink(dets) }
     }
@@ -194,78 +218,136 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 }
 
 // ---------------------------------------------------------------------
-//  YOLO int8 detector
+//  YOLO FULL int8 detector
 // ---------------------------------------------------------------------
 //
-//  Model: best_int8.tflite (YOLO26n, single class "item", 320x320, NMS embedded).
-//  Output assumed shape [1, N, 6] = (x1, y1, x2, y2, conf, cls) normalized to 0..1.
-//  Robust fallback: also tries [1, 6, N] layout.
+//  Model: best_full_integer_quant.tflite (YOLO26n single class "item",
+//         320x320, NMS embedded).
+//  Input  : int8  [1,320,320,3]  scale=1/255 zp=-128
+//           => quantized = pixel(0..255) - 128  (stored as Int8 bit pattern)
+//  Output : int8  [1,300,6]      scale~0.00412 zp=-124
+//           layout: x1, y1, x2, y2, score, cls   (normalized to 0..1)
+//
+//  Verified Python sanity on host: dequant of raw int8 gives values in [0..1]
+//  matching expected coords/scores; rows below threshold come back with score=0.
 
-enum YoloError: Error { case modelNotFound, allocFailed }
+enum YoloError: Error { case modelNotFound, allocFailed, badTensor }
 
 final class YoloDetector {
   private let interpreter: Interpreter
   private let inputW = 320
   private let inputH = 320
   private let inputChannels = 3
-  private var resizeBuf = [UInt8](repeating: 0, count: 320 * 320 * 4)
-  private var rgbBuf = [UInt8](repeating: 0, count: 320 * 320 * 3)
-  // int8 quant params for input tensor.
+
+  // Reusable buffers.
+  private var resizeBuf: [UInt8]              // 320x320 BGRA
+  private var inputBuf: [UInt8]               // 320x320x3 packed RGB int8 bit-pattern
+
+  // Quant params.
   private let inScale: Float
   private let inZero: Int
+  private let outScale: Float
+  private let outZero: Int
+
+  // Cached output shape info.
+  private let outRows: Int    // 300
+  private let outCols: Int    // 6
+  private var frameCounter: Int = 0
 
   init() throws {
-    guard let path = Bundle.main.path(forResource: "best_int8",
-                                      ofType: "tflite",
-                                      inDirectory: "flutter_assets/assets/models")
-            ?? Bundle.main.path(forResource: "best_int8", ofType: "tflite")
-    else {
+    // Resolve asset path (Flutter copies assets/* under flutter_assets/).
+    let candidates: [(String, String?)] = [
+      ("best_full_integer_quant", "flutter_assets/assets/models"),
+      ("best_full_integer_quant", nil),
+      ("best_int8", "flutter_assets/assets/models"),  // legacy fallback
+      ("best_int8", nil),
+    ]
+    var resolved: String? = nil
+    for (name, dir) in candidates {
+      if let p = Bundle.main.path(forResource: name, ofType: "tflite", inDirectory: dir) {
+        NSLog("\(kLogTag) model resolved: \(name).tflite at dir=\(dir ?? "<root>") -> \(p)")
+        resolved = p
+        break
+      }
+    }
+    guard let path = resolved else {
+      NSLog("\(kLogTag) model NOT found in bundle. Listing flutter_assets/assets/models:")
+      if let res = Bundle.main.resourcePath {
+        let modelsDir = (res as NSString)
+          .appendingPathComponent("flutter_assets/assets/models")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: modelsDir)) ?? []
+        for f in files { NSLog("\(kLogTag)   - \(f)") }
+      }
       throw YoloError.modelNotFound
     }
+
     var opts = Interpreter.Options()
     opts.threadCount = 2
     let interp = try Interpreter(modelPath: path, options: opts)
     try interp.allocateTensors()
     self.interpreter = interp
+
     let inT = try interp.input(at: 0)
-    if let q = inT.quantizationParameters {
-      self.inScale = Float(q.scale)
-      self.inZero = q.zeroPoint
+    let outT = try interp.output(at: 0)
+
+    self.inScale = Float(inT.quantizationParameters?.scale ?? (1.0 / 255.0))
+    self.inZero  = inT.quantizationParameters?.zeroPoint ?? -128
+    self.outScale = Float(outT.quantizationParameters?.scale ?? 1.0)
+    self.outZero  = outT.quantizationParameters?.zeroPoint ?? 0
+
+    // Expected shape: [1, 300, 6]
+    let oshape = outT.shape.dimensions
+    if oshape.count == 3 {
+      self.outRows = oshape[1]
+      self.outCols = oshape[2]
     } else {
-      self.inScale = 1.0 / 255.0
-      self.inZero = 0
+      NSLog("\(kLogTag) UNEXPECTED output shape: \(oshape)")
+      self.outRows = 300
+      self.outCols = 6
     }
-    NSLog("[DMTX] input shape=\(inT.shape) dtype=\(inT.dataType) scale=\(inScale) zero=\(inZero)")
-    let outCount = interp.outputTensorCount
-    NSLog("[DMTX] output tensor count=\(outCount)")
-    for i in 0..<outCount {
-      if let t = try? interp.output(at: i) {
-        NSLog("[DMTX] output[\(i)] shape=\(t.shape) dtype=\(t.dataType)")
-      }
-    }
+
+    self.resizeBuf = [UInt8](repeating: 0, count: inputW * inputH * 4)
+    self.inputBuf  = [UInt8](repeating: 0, count: inputW * inputH * 3)
+
+    NSLog("\(kLogTag) ===== YoloDetector initialised =====")
+    NSLog("\(kLogTag) input  shape=\(inT.shape.dimensions) dtype=\(inT.dataType) scale=\(inScale) zp=\(inZero)")
+    NSLog("\(kLogTag) output shape=\(oshape) dtype=\(outT.dataType) scale=\(outScale) zp=\(outZero)")
+    NSLog("\(kLogTag) outTensorCount=\(interp.outputTensorCount) rows=\(outRows) cols=\(outCols)")
   }
 
   func run(pixelBuffer: CVPixelBuffer, frameId: Int, threshold: Float) -> [[String: Any]] {
-    guard let inputData = preprocess(pixelBuffer) else { return [] }
+    frameCounter &+= 1
+    let logThis = (frameCounter % kFrameLogEvery == 0)
+
+    guard let inputData = preprocess(pixelBuffer, logThis: logThis) else {
+      if logThis { NSLog("\(kLogTag) preprocess returned nil") }
+      return []
+    }
+
     do {
       try interpreter.copy(inputData, toInputAt: 0)
       try interpreter.invoke()
-      return decode(frameId: frameId, threshold: threshold)
     } catch {
-      NSLog("[DMTX] invoke error: \(error)")
+      NSLog("\(kLogTag) invoke error: \(error)")
       return []
     }
+    return decode(frameId: frameId, threshold: threshold, logThis: logThis)
   }
 
-  // Center-crop & resize BGRA pixel buffer → 320x320 RGB → int8.
-  private func preprocess(_ pb: CVPixelBuffer) -> Data? {
+  // -----------------------------------------------------------------
+  //  Preprocess: BGRA pixel buffer -> 320x320 RGB int8 bit-pattern
+  // -----------------------------------------------------------------
+  private func preprocess(_ pb: CVPixelBuffer, logThis: Bool) -> Data? {
     CVPixelBufferLockBaseAddress(pb, .readOnly)
     defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
 
     let w = CVPixelBufferGetWidth(pb)
     let h = CVPixelBufferGetHeight(pb)
     let stride = CVPixelBufferGetBytesPerRow(pb)
-    guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
+    guard let base = CVPixelBufferGetBaseAddress(pb) else {
+      NSLog("\(kLogTag) preprocess: base address nil")
+      return nil
+    }
 
     // Center-crop square.
     let side = min(w, h)
@@ -278,139 +360,112 @@ final class YoloDetector {
       width: vImagePixelCount(side),
       rowBytes: stride)
 
-    var dstBuf = resizeBuf.withUnsafeMutableBufferPointer { ptr -> vImage_Buffer in
-      vImage_Buffer(data: ptr.baseAddress,
-                    height: vImagePixelCount(inputH),
-                    width: vImagePixelCount(inputW),
-                    rowBytes: inputW * 4)
+    let err: vImage_Error = resizeBuf.withUnsafeMutableBufferPointer { ptr -> vImage_Error in
+      var dstBuf = vImage_Buffer(
+        data: ptr.baseAddress,
+        height: vImagePixelCount(inputH),
+        width: vImagePixelCount(inputW),
+        rowBytes: inputW * 4)
+      return vImageScale_ARGB8888(&srcBuf, &dstBuf, nil,
+                                  vImage_Flags(kvImageHighQualityResampling))
+    }
+    if err != kvImageNoError {
+      NSLog("\(kLogTag) preprocess: vImageScale failed err=\(err)")
+      return nil
     }
 
-    let err = vImageScale_ARGB8888(&srcBuf, &dstBuf, nil, vImage_Flags(kvImageHighQualityResampling))
-    if err != kvImageNoError { return nil }
-
-    // BGRA → RGB int8 with quantization: q = round(real/scale) + zero,
-    // but model expects normalized [0,1] in int8 representation, so:
-    //   real = pixel/255.0
-    //   q = round(real / scale) + zero
-    let scale = inScale
-    let zero = inZero
-    let invScale = scale > 0 ? (1.0 / scale) : 255.0
-    var di = 0
-    let resized = resizeBuf
-    var rgb = rgbBuf
+    // BGRA(0..255) -> RGB int8 bit-pattern. Quantization is exact:
+    //   real = pixel/255
+    //   q    = round(real / scale + zp) = round(pixel/255 * 255 + (-128)) = pixel - 128
+    // Stored as Int8 bit pattern, which equals (pixel ^ 0x80) for every byte.
     let count = inputW * inputH
-    for i in 0..<count {
-      let b = Float(resized[i * 4 + 0])
-      let g = Float(resized[i * 4 + 1])
-      let r = Float(resized[i * 4 + 2])
-      // YOLO trained on RGB 0..1.
-      let qr = Int((r / 255.0) * invScale) + zero
-      let qg = Int((g / 255.0) * invScale) + zero
-      let qb = Int((b / 255.0) * invScale) + zero
-      rgb[di + 0] = UInt8(truncatingIfNeeded: qr)
-      rgb[di + 1] = UInt8(truncatingIfNeeded: qg)
-      rgb[di + 2] = UInt8(truncatingIfNeeded: qb)
-      di += 3
+    var rMin: UInt8 = 255, rMax: UInt8 = 0
+    inputBuf.withUnsafeMutableBufferPointer { dstPtr in
+      resizeBuf.withUnsafeBufferPointer { srcPtr in
+        let src = srcPtr.baseAddress!
+        let dst = dstPtr.baseAddress!
+        var di = 0
+        for i in 0..<count {
+          let b = src[i * 4 + 0]
+          let g = src[i * 4 + 1]
+          let r = src[i * 4 + 2]
+          if logThis {
+            if r < rMin { rMin = r }
+            if r > rMax { rMax = r }
+          }
+          // pixel - 128 (overflow), gives exact int8 bit pattern.
+          dst[di + 0] = r &- 128
+          dst[di + 1] = g &- 128
+          dst[di + 2] = b &- 128
+          di += 3
+        }
+      }
     }
-    rgbBuf = rgb
-    return Data(rgbBuf)
+
+    if logThis {
+      NSLog(String(format: "\(kLogTag) preprocess src=%dx%d crop=%d resized=320x320 R range=[%d..%d]",
+                   w, h, side, rMin, rMax))
+    }
+    return Data(inputBuf)
   }
 
-  private func decode(frameId: Int, threshold: Float) -> [[String: Any]] {
-    guard let out0 = try? interpreter.output(at: 0) else { return [] }
-    let shape = out0.shape.dimensions
-    let qp = out0.quantizationParameters
-    let scale: Float = qp.map { Float($0.scale) } ?? 1.0
-    let zero: Int = qp?.zeroPoint ?? 0
+  // -----------------------------------------------------------------
+  //  Decode: int8 [1, 300, 6] -> normalized boxes
+  // -----------------------------------------------------------------
+  private func decode(frameId: Int, threshold: Float, logThis: Bool) -> [[String: Any]] {
+    guard let out0 = try? interpreter.output(at: 0) else {
+      NSLog("\(kLogTag) decode: output(0) failed")
+      return []
+    }
+    let raw = [UInt8](out0.data)
+    let n = outRows
+    let k = outCols
+    let scale = outScale
+    let zp = Float(outZero)
 
-    // Single-tensor [1, N, 6] or [1, 6, N] layout.
-    if shape.count == 3 && (shape[2] == 6 || shape[1] == 6) {
-      let n: Int
-      let stride: Int
-      let strideAttr: Int
-      let layoutNxK: Bool
-      if shape[2] == 6 {
-        n = shape[1]; stride = 6; strideAttr = 1; layoutNxK = true
-      } else {
-        n = shape[2]; stride = 1; strideAttr = n; layoutNxK = false
-      }
-      let raw = [UInt8](out0.data)
-      // Detect dtype via string description (TFLite 2.14 Swift enum
-      // does not expose .int8 publicly on all builds; using `String(describing:)`
-      // works for .int8/.uInt8/.float32 alike).
-      let dtypeStr = String(describing: out0.dataType)
-      let isInt8 = dtypeStr.contains("int8") && !dtypeStr.contains("uInt8") && !dtypeStr.contains("UInt8")
-      let isUInt8 = dtypeStr.lowercased().contains("uint8")
-      func getF(_ idx: Int) -> Float {
-        if isInt8 {
-          let v = Int8(bitPattern: raw[idx])
-          return (Float(Int(v)) - Float(zero)) * scale
-        } else if isUInt8 {
-          return (Float(Int(raw[idx])) - Float(zero)) * scale
-        } else {
-          // float32
-          return raw.withUnsafeBytes { buf in
-            buf.bindMemory(to: Float32.self)[idx]
-          }
-        }
-      }
-      var out: [[String: Any]] = []
-      out.reserveCapacity(min(n, 50))
-      for i in 0..<n {
-        let base = layoutNxK ? i * stride : i
-        let getAt: (Int) -> Float = { k in
-          getF(layoutNxK ? base + k : i + k * strideAttr)
-        }
-        let conf = getAt(4)
-        if conf < threshold { continue }
-        var x1 = getAt(0), y1 = getAt(1), x2 = getAt(2), y2 = getAt(3)
-        let cls = Int(getAt(5).rounded())
-        // If coords look like pixels (>1.5), normalize by model size.
-        if max(x2, y2) > 1.5 {
-          x1 /= Float(inputW); x2 /= Float(inputW)
-          y1 /= Float(inputH); y2 /= Float(inputH)
-        }
-        // Clamp
-        x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
-        x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
-        if x2 <= x1 || y2 <= y1 { continue }
-        out.append([
-          "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-          "score": conf, "cls": cls, "fid": frameId,
-        ])
-        if out.count >= 50 { break }
-      }
-      return out
+    // Helper: read int8 -> dequantized float.
+    @inline(__always) func deq(_ idx: Int) -> Float {
+      let v = Int8(bitPattern: raw[idx])
+      return (Float(Int(v)) - zp) * scale
     }
 
-    // Fallback: 4-tensor TFLite Detection_PostProcess layout.
-    if interpreter.outputTensorCount >= 4,
-       let boxesT = try? interpreter.output(at: 0),
-       let classesT = try? interpreter.output(at: 1),
-       let scoresT = try? interpreter.output(at: 2),
-       let countT = try? interpreter.output(at: 3)
-    {
-      let boxes = boxesT.data.toFloatArray()
-      let classes = classesT.data.toFloatArray()
-      let scores = scoresT.data.toFloatArray()
-      let count = Int(countT.data.toFloatArray().first ?? 0)
-      var out: [[String: Any]] = []
-      for i in 0..<min(count, scores.count) {
-        let s = scores[i]
-        if s < threshold { continue }
-        let ymin = boxes[i * 4 + 0]
-        let xmin = boxes[i * 4 + 1]
-        let ymax = boxes[i * 4 + 2]
-        let xmax = boxes[i * 4 + 3]
-        out.append([
-          "x1": xmin, "y1": ymin, "x2": xmax, "y2": ymax,
-          "score": s, "cls": Int(classes[i]), "fid": frameId,
-        ])
-      }
-      return out
+    var out: [[String: Any]] = []
+    out.reserveCapacity(8)
+    var topScore: Float = 0
+    var anyAboveZero = 0
+
+    for i in 0..<n {
+      let base = i * k
+      let conf = deq(base + 4)
+      if conf > 0.001 { anyAboveZero += 1 }
+      if conf > topScore { topScore = conf }
+      if conf < threshold { continue }
+      var x1 = deq(base + 0)
+      var y1 = deq(base + 1)
+      var x2 = deq(base + 2)
+      var y2 = deq(base + 3)
+      let cls = Int(deq(base + 5).rounded())
+      // Already normalized 0..1; clamp.
+      x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
+      x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
+      if x2 <= x1 || y2 <= y1 { continue }
+      out.append([
+        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+        "score": conf, "cls": cls, "fid": frameId,
+      ])
+      if out.count >= 50 { break }
     }
 
-    return []
+    if logThis {
+      NSLog(String(format: "\(kLogTag) decode rows=%d nonZero=%d topScore=%.3f kept=%d (thr=%.2f)",
+                   n, anyAboveZero, Double(topScore), out.count, Double(threshold)))
+      // Dump first row raw + dequant for diagnostics.
+      if raw.count >= k {
+        let row0: [Float] = (0..<k).map { deq($0) }
+        NSLog("\(kLogTag) decode row[0] dequant=\(row0)")
+      }
+    }
+    return out
   }
 }
 
