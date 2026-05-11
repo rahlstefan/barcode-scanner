@@ -71,6 +71,7 @@ final class DLog {
 @objc class AppDelegate: FlutterAppDelegate {
   private var detectionsSink: FlutterEventSink?
   private var detector: YoloDetector?
+  private var lastDetectorError: String?
   private var confidenceThreshold: Float = 0.25
   private weak var lastCameraView: CameraPreviewView?
 
@@ -107,9 +108,15 @@ final class DLog {
           result(nil)
         } else { result(FlutterError(code: "args", message: "value required", details: nil)) }
       case "selfTest":
-        let res = self.detector?.runSelfTest() ?? "detector nil"
-        dlog("manual self-test -> \(res)")
-        result(res)
+        if let det = self.detector {
+          let res = det.runSelfTest()
+          dlog("manual self-test -> \(res)")
+          result(res)
+        } else {
+          let msg = "detector nil; lastError=\(self.lastDetectorError ?? "<none>")"
+          dlog("manual self-test -> \(msg)")
+          result(msg)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -124,6 +131,7 @@ final class DLog {
         if let s = self?.detector?.runSelfTest() { dlog("SELF-TEST: \(s)") }
       }
     } catch {
+      lastDetectorError = "\(error)"
       dlog("FAILED to load model: \(error)")
     }
 
@@ -138,7 +146,9 @@ final class DLog {
   // Called by the camera view on every frame (videoQueue).
   func handleSampleBuffer(_ pixelBuffer: CVPixelBuffer, frameId: Int) {
     guard let det = detector else {
-      if frameId % 60 == 0 { dlog("frame=\(frameId) detector is nil") }
+      if frameId % 60 == 0 {
+        dlog("frame=\(frameId) detector is nil; lastError=\(lastDetectorError ?? "<none>")")
+      }
       return
     }
     let t0 = CACurrentMediaTime()
@@ -329,27 +339,75 @@ final class YoloDetector {
   private let outCols: Int    // 6
 
   init() throws {
-    let candidates: [(String, String?)] = [
-      ("best_full_integer_quant", "flutter_assets/assets/models"),
-      ("best_full_integer_quant", nil),
-      ("best_int8", "flutter_assets/assets/models"),
-      ("best_int8", nil),
+    // Flutter ships assets inside App.framework, NOT under Runner.app/.
+    // Use FlutterDartProject.lookupKey(forAsset:) to translate the
+    // pubspec asset path -> bundle resource key, then resolve via
+    // Bundle.main.path(forResource:ofType:).
+    let assetCandidates = [
+      "assets/models/best_full_integer_quant.tflite",
+      "assets/models/best_int8.tflite",
     ]
     var resolved: String? = nil
-    for (name, dir) in candidates {
-      if let p = Bundle.main.path(forResource: name, ofType: "tflite", inDirectory: dir) {
-        dlog("model resolved: \(name).tflite at dir=\(dir ?? "<root>")")
+    for asset in assetCandidates {
+      let key = FlutterDartProject.lookupKey(forAsset: asset)
+      if let p = Bundle.main.path(forResource: key, ofType: nil) {
+        dlog("model resolved via FlutterDartProject: \(asset) -> key=\(key)")
         resolved = p
         break
+      } else {
+        dlog("FlutterDartProject lookup miss: asset=\(asset) key=\(key)")
       }
     }
+
+    // Fallback 1: scan App.framework/flutter_assets directly.
+    if resolved == nil {
+      let fm = FileManager.default
+      let frameworksDir = (Bundle.main.bundlePath as NSString)
+        .appendingPathComponent("Frameworks")
+      if let frameworks = try? fm.contentsOfDirectory(atPath: frameworksDir) {
+        for fw in frameworks where fw.hasSuffix(".framework") {
+          let candidate = (frameworksDir as NSString)
+            .appendingPathComponent(fw)
+            .appending("/flutter_assets/assets/models/best_full_integer_quant.tflite")
+          if fm.fileExists(atPath: candidate) {
+            dlog("model resolved via framework scan: \(candidate)")
+            resolved = candidate
+            break
+          }
+        }
+      }
+    }
+
+    // Fallback 2: legacy Bundle.main.path(forResource:inDirectory:).
+    if resolved == nil {
+      let legacy: [(String, String?)] = [
+        ("best_full_integer_quant", "flutter_assets/assets/models"),
+        ("best_full_integer_quant", nil),
+      ]
+      for (name, dir) in legacy {
+        if let p = Bundle.main.path(forResource: name, ofType: "tflite", inDirectory: dir) {
+          dlog("model resolved via legacy lookup: \(p)")
+          resolved = p
+          break
+        }
+      }
+    }
+
     guard let path = resolved else {
-      dlog("model NOT found in bundle. Listing flutter_assets/assets/models:")
-      if let res = Bundle.main.resourcePath {
-        let modelsDir = (res as NSString)
-          .appendingPathComponent("flutter_assets/assets/models")
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: modelsDir)) ?? []
-        for f in files { dlog("  - \(f)") }
+      // Diagnostic dump of bundle contents.
+      dlog("model NOT found. Bundle dump:")
+      dlog("  bundlePath=\(Bundle.main.bundlePath)")
+      let fm = FileManager.default
+      let fwDir = (Bundle.main.bundlePath as NSString).appendingPathComponent("Frameworks")
+      if let fws = try? fm.contentsOfDirectory(atPath: fwDir) {
+        dlog("  Frameworks/: \(fws)")
+        for fw in fws where fw.hasSuffix(".framework") {
+          let assetsDir = (fwDir as NSString)
+            .appendingPathComponent(fw)
+            .appending("/flutter_assets/assets/models")
+          let files = (try? fm.contentsOfDirectory(atPath: assetsDir)) ?? []
+          dlog("    \(fw)/flutter_assets/assets/models: \(files)")
+        }
       }
       throw YoloError.modelNotFound
     }
