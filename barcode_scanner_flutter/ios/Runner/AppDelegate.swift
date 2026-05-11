@@ -414,12 +414,46 @@ final class YoloDetector {
 
     var opts = Interpreter.Options()
     opts.threadCount = 2
-    let interp = try Interpreter(modelPath: path, options: opts)
-    try interp.allocateTensors()
+    dlog("step1: Interpreter(modelPath:) path=\(path)")
+    let interp: Interpreter
+    do {
+      interp = try Interpreter(modelPath: path, options: opts)
+    } catch {
+      dlog("step1 FAILED: \(error)")
+      throw error
+    }
+    dlog("step2: allocateTensors()")
+    do { try interp.allocateTensors() } catch {
+      dlog("step2 FAILED: \(error)"); throw error
+    }
     self.interpreter = interp
+    dlog("step3: inputTensorCount=\(interp.inputTensorCount) outputTensorCount=\(interp.outputTensorCount)")
 
-    let inT = try interp.input(at: 0)
-    let outT = try interp.output(at: 0)
+    let inT: Tensor
+    do {
+      dlog("step4: input(at:0)")
+      inT = try interp.input(at: 0)
+    } catch {
+      dlog("step4 FAILED reading input(0): \(error)")
+      throw error
+    }
+    let outT: Tensor
+    do {
+      dlog("step5: output(at:0)")
+      outT = try interp.output(at: 0)
+    } catch {
+      dlog("step5 FAILED reading output(0): \(error)")
+      // Try every output to find which one is bad / good.
+      for i in 0..<interp.outputTensorCount {
+        do {
+          let t = try interp.output(at: i)
+          dlog("  output[\(i)] OK shape=\(t.shape.dimensions) dtype=\(t.dataType)")
+        } catch {
+          dlog("  output[\(i)] FAIL \(error)")
+        }
+      }
+      throw error
+    }
 
     self.inScale = Float(inT.quantizationParameters?.scale ?? (1.0 / 255.0))
     self.inZero  = inT.quantizationParameters?.zeroPoint ?? -128
