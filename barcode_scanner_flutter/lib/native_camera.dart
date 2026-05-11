@@ -46,11 +46,27 @@ class DetectionStream {
           frameId: (m['fid'] as num).toInt(),
         );
       }).toList();
-    });
+    }).asBroadcastStream();
     return _stream!;
   }
 
   static Future<void> setConfidenceThreshold(double t) async {
     await _control.invokeMethod('setConfidence', {'value': t});
+  }
+
+  static Future<String> runSelfTest() async {
+    final r = await _control.invokeMethod<String>('selfTest');
+    return r ?? '<null>';
+  }
+}
+
+/// Native log line stream (mirrors NSLog into the app via EventChannel
+/// `com.bboxfix/logs`). Useful when there is no Mac to read device logs.
+class NativeLogStream {
+  static const _channel = EventChannel('com.bboxfix/logs');
+  static Stream<String>? _stream;
+  static Stream<String> stream() {
+    _stream ??= _channel.receiveBroadcastStream().map((e) => e.toString()).asBroadcastStream();
+    return _stream!;
   }
 }

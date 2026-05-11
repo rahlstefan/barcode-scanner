@@ -9,46 +9,91 @@ import Accelerate
 //  - AVFoundation capture (AVCaptureSession + AVCaptureVideoDataOutput)
 //  - TensorFlowLiteSwift FULL int8 inference
 //      model: best_full_integer_quant.tflite
-//      input  : int8  [1,320,320,3]  scale=1/255 zero=-128
-//      output : int8  [1,300,6]      scale~0.00412 zero=-124  (NMS embedded,
-//                                    layout: x1,y1,x2,y2,score,cls normalized)
-//  - Streams normalized detections to Flutter via EventChannel
-//  - Hosts camera preview as a Flutter PlatformView
+//      input  : int8  [1,320,320,3]  scale=1/255 zp=-128
+//      output : int8  [1,300,6]      scale~0.00412 zp=-124   NMS embedded
+//                                    layout: x1, y1, x2, y2, score, cls
+//                                    coords normalized to 0..1
+//
+//  Logs: NSLog + in-app overlay (Dart side reads `com.bboxfix/logs`).
 // =====================================================================
 
-fileprivate let kLogTag = "[DMTX]"
-fileprivate var kFrameLogEvery: Int = 30   // log a summary every N frames
+// ---------------------------------------------------------------------
+// MARK: - Global logger (NSLog + Flutter EventChannel + ring buffer)
+// ---------------------------------------------------------------------
+
+final class DLog {
+  static let shared = DLog()
+  private let lock = NSLock()
+  private var ring: [String] = []
+  private let ringMax = 400
+  private var sink: FlutterEventSink?
+
+  func attach(sink: @escaping FlutterEventSink) {
+    lock.lock()
+    self.sink = sink
+    let snapshot = ring
+    lock.unlock()
+    DispatchQueue.main.async {
+      for line in snapshot { sink(line) }
+    }
+  }
+
+  func detach() {
+    lock.lock(); defer { lock.unlock() }
+    sink = nil
+  }
+
+  func log(_ msg: String) {
+    let ts = String(format: "%.3f", CACurrentMediaTime())
+    let line = "[\(ts)] \(msg)"
+    NSLog("[DMTX] %@", line)
+    var sinkRef: FlutterEventSink?
+    lock.lock()
+    ring.append(line)
+    if ring.count > ringMax { ring.removeFirst(ring.count - ringMax) }
+    sinkRef = sink
+    lock.unlock()
+    if let s = sinkRef {
+      DispatchQueue.main.async { s(line) }
+    }
+  }
+}
+
+@inline(__always) func dlog(_ msg: @autoclosure () -> String) {
+  DLog.shared.log(msg())
+}
+
+// ---------------------------------------------------------------------
+// MARK: - AppDelegate
+// ---------------------------------------------------------------------
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
   private var detectionsSink: FlutterEventSink?
   private var detector: YoloDetector?
-  private var confidenceThreshold: Float = 0.35
+  private var confidenceThreshold: Float = 0.25
   private weak var lastCameraView: CameraPreviewView?
 
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    NSLog("\(kLogTag) ===== AppDelegate.didFinishLaunching =====")
+    dlog("===== AppDelegate.didFinishLaunching =====")
     GeneratedPluginRegistrant.register(with: self)
     let controller = window?.rootViewController as! FlutterViewController
     let messenger = controller.binaryMessenger
 
-    // 1. Load TFLite model.
-    do {
-      detector = try YoloDetector()
-      NSLog("\(kLogTag) YOLO full-int8 model loaded OK")
-    } catch {
-      NSLog("\(kLogTag) FAILED to load model: \(error)")
-    }
+    // 1. Logs EventChannel — register FIRST so Dart can attach early.
+    let logsChannel = FlutterEventChannel(
+      name: "com.bboxfix/logs", binaryMessenger: messenger)
+    logsChannel.setStreamHandler(LogsStreamHandler())
 
-    // 2. EventChannel for detections.
+    // 2. Detections EventChannel.
     let eventChannel = FlutterEventChannel(
       name: "com.bboxfix/detections", binaryMessenger: messenger)
     eventChannel.setStreamHandler(self)
 
-    // 3. MethodChannel for control.
+    // 3. Control MethodChannel.
     let methodChannel = FlutterMethodChannel(
       name: "com.bboxfix/control", binaryMessenger: messenger)
     methodChannel.setMethodCallHandler { [weak self] call, result in
@@ -58,14 +103,31 @@ fileprivate var kFrameLogEvery: Int = 30   // log a summary every N frames
         if let args = call.arguments as? [String: Any],
            let v = args["value"] as? Double {
           self.confidenceThreshold = Float(v)
+          dlog(String(format: "confidence threshold set to %.2f", v))
           result(nil)
         } else { result(FlutterError(code: "args", message: "value required", details: nil)) }
+      case "selfTest":
+        let res = self.detector?.runSelfTest() ?? "detector nil"
+        dlog("manual self-test -> \(res)")
+        result(res)
       default:
         result(FlutterMethodNotImplemented)
       }
     }
 
-    // 4. PlatformView factory for the camera preview.
+    // 4. Load TFLite model (after logs are wired).
+    do {
+      detector = try YoloDetector()
+      dlog("YOLO full-int8 model loaded OK")
+      // Run startup self-test on a synthetic pattern (proves inference works).
+      DispatchQueue.global(qos: .utility).async { [weak self] in
+        if let s = self?.detector?.runSelfTest() { dlog("SELF-TEST: \(s)") }
+      }
+    } catch {
+      dlog("FAILED to load model: \(error)")
+    }
+
+    // 5. PlatformView factory for the camera preview.
     let factory = CameraPreviewFactory(messenger: messenger, owner: self)
     self.registrar(forPlugin: "CameraPreviewPlugin")?
       .register(factory, withId: "com.bboxfix/camera_preview")
@@ -73,26 +135,24 @@ fileprivate var kFrameLogEvery: Int = 30   // log a summary every N frames
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
-  // Called by the camera view on every frame.
+  // Called by the camera view on every frame (videoQueue).
   func handleSampleBuffer(_ pixelBuffer: CVPixelBuffer, frameId: Int) {
     guard let det = detector else {
-      if frameId % kFrameLogEvery == 0 {
-        NSLog("\(kLogTag) frame=\(frameId) skipped — detector is nil")
-      }
+      if frameId % 60 == 0 { dlog("frame=\(frameId) detector is nil") }
       return
     }
     let t0 = CACurrentMediaTime()
     let dets = det.run(pixelBuffer: pixelBuffer, frameId: frameId,
                        threshold: confidenceThreshold)
     let dt = (CACurrentMediaTime() - t0) * 1000.0
-    if frameId % kFrameLogEvery == 0 {
-      NSLog(String(format: "\(kLogTag) frame=%d dets=%d thr=%.2f infer=%.1fms sink=%@",
-                   frameId, dets.count, Double(confidenceThreshold), dt,
-                   detectionsSink == nil ? "NIL" : "OK"))
+    if frameId % 30 == 0 {
+      dlog(String(format: "frame=%d dets=%d thr=%.2f infer=%.1fms sink=%@",
+                  frameId, dets.count, Double(confidenceThreshold), dt,
+                  detectionsSink == nil ? "NIL" : "OK"))
     } else if !dets.isEmpty {
-      NSLog(String(format: "\(kLogTag) frame=%d dets=%d top=%.2f infer=%.1fms",
-                   frameId, dets.count,
-                   Double((dets.first?["score"] as? Float) ?? 0), dt))
+      dlog(String(format: "frame=%d dets=%d top=%.2f infer=%.1fms",
+                  frameId, dets.count,
+                  Double((dets.first?["score"] as? Float) ?? 0), dt))
     }
     if let sink = detectionsSink {
       DispatchQueue.main.async { sink(dets) }
@@ -107,16 +167,32 @@ extension AppDelegate: FlutterStreamHandler {
     -> FlutterError?
   {
     detectionsSink = events
+    dlog("detections sink ATTACHED")
     return nil
   }
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
     detectionsSink = nil
+    dlog("detections sink DETACHED")
+    return nil
+  }
+}
+
+final class LogsStreamHandler: NSObject, FlutterStreamHandler {
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink)
+    -> FlutterError?
+  {
+    DLog.shared.attach(sink: events)
+    DLog.shared.log("logs sink ATTACHED")
+    return nil
+  }
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    DLog.shared.detach()
     return nil
   }
 }
 
 // ---------------------------------------------------------------------
-//  PlatformView factory & view
+// MARK: - Camera PlatformView
 // ---------------------------------------------------------------------
 
 class CameraPreviewFactory: NSObject, FlutterPlatformViewFactory {
@@ -157,14 +233,14 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 
   private func setupSession() {
     session.beginConfiguration()
-    session.sessionPreset = .vga640x480 // small input — model is 320x320 anyway
+    session.sessionPreset = .vga640x480
 
     guard let device = AVCaptureDevice.default(.builtInWideAngleCamera,
                                                for: .video, position: .back),
           let input = try? AVCaptureDeviceInput(device: device),
           session.canAddInput(input)
     else {
-      NSLog("[DMTX] No camera available")
+      dlog("camera: no back camera available")
       session.commitConfiguration()
       return
     }
@@ -177,8 +253,11 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
     output.alwaysDiscardsLateVideoFrames = true
     output.setSampleBufferDelegate(self, queue: videoQueue)
     if session.canAddOutput(output) { session.addOutput(output) }
-    if let conn = output.connection(with: .video), conn.isVideoOrientationSupported {
-      conn.videoOrientation = .portrait
+    if let conn = output.connection(with: .video) {
+      if conn.isVideoOrientationSupported {
+        conn.videoOrientation = .portrait
+      }
+      dlog("camera: data-output orientation=\(conn.videoOrientation.rawValue) suppOrient=\(conn.isVideoOrientationSupported)")
     }
     session.commitConfiguration()
 
@@ -187,9 +266,8 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
     previewLayer.frame = container.bounds
     previewLayer.connection?.videoOrientation = .portrait
     container.layer.addSublayer(previewLayer)
-
-    // Auto-resize preview to view bounds.
     container.layer.masksToBounds = true
+
     NotificationCenter.default.addObserver(
       forName: UIDevice.orientationDidChangeNotification, object: nil, queue: .main
     ) { [weak self] _ in
@@ -198,16 +276,24 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       self?.session.startRunning()
+      dlog("camera: session.startRunning() called")
     }
   }
 
-  // Frame callback.
   func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
                      from connection: AVCaptureConnection) {
     guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
     frameId &+= 1
+    if frameId == 1 {
+      let w = CVPixelBufferGetWidth(pb)
+      let h = CVPixelBufferGetHeight(pb)
+      let fmt = CVPixelBufferGetPixelFormatType(pb)
+      let f0 = UInt8((fmt >> 24) & 0xff), f1 = UInt8((fmt >> 16) & 0xff)
+      let f2 = UInt8((fmt >> 8) & 0xff),  f3 = UInt8(fmt & 0xff)
+      let fc = String(bytes: [f0, f1, f2, f3], encoding: .ascii) ?? "?"
+      dlog("first frame: \(w)x\(h) fmt='\(fc)' (0x\(String(fmt, radix:16)))")
+    }
     owner?.handleSampleBuffer(pb, frameId: frameId)
-    // Keep preview frame in sync with container size.
     DispatchQueue.main.async { [weak self] in
       guard let self = self else { return }
       if self.previewLayer.frame != self.container.bounds {
@@ -218,18 +304,8 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 }
 
 // ---------------------------------------------------------------------
-//  YOLO FULL int8 detector
+// MARK: - YOLO FULL int8 detector
 // ---------------------------------------------------------------------
-//
-//  Model: best_full_integer_quant.tflite (YOLO26n single class "item",
-//         320x320, NMS embedded).
-//  Input  : int8  [1,320,320,3]  scale=1/255 zp=-128
-//           => quantized = pixel(0..255) - 128  (stored as Int8 bit pattern)
-//  Output : int8  [1,300,6]      scale~0.00412 zp=-124
-//           layout: x1, y1, x2, y2, score, cls   (normalized to 0..1)
-//
-//  Verified Python sanity on host: dequant of raw int8 gives values in [0..1]
-//  matching expected coords/scores; rows below threshold come back with score=0.
 
 enum YoloError: Error { case modelNotFound, allocFailed, badTensor }
 
@@ -237,7 +313,6 @@ final class YoloDetector {
   private let interpreter: Interpreter
   private let inputW = 320
   private let inputH = 320
-  private let inputChannels = 3
 
   // Reusable buffers.
   private var resizeBuf: [UInt8]              // 320x320 BGRA
@@ -249,34 +324,32 @@ final class YoloDetector {
   private let outScale: Float
   private let outZero: Int
 
-  // Cached output shape info.
+  // Output shape.
   private let outRows: Int    // 300
   private let outCols: Int    // 6
-  private var frameCounter: Int = 0
 
   init() throws {
-    // Resolve asset path (Flutter copies assets/* under flutter_assets/).
     let candidates: [(String, String?)] = [
       ("best_full_integer_quant", "flutter_assets/assets/models"),
       ("best_full_integer_quant", nil),
-      ("best_int8", "flutter_assets/assets/models"),  // legacy fallback
+      ("best_int8", "flutter_assets/assets/models"),
       ("best_int8", nil),
     ]
     var resolved: String? = nil
     for (name, dir) in candidates {
       if let p = Bundle.main.path(forResource: name, ofType: "tflite", inDirectory: dir) {
-        NSLog("\(kLogTag) model resolved: \(name).tflite at dir=\(dir ?? "<root>") -> \(p)")
+        dlog("model resolved: \(name).tflite at dir=\(dir ?? "<root>")")
         resolved = p
         break
       }
     }
     guard let path = resolved else {
-      NSLog("\(kLogTag) model NOT found in bundle. Listing flutter_assets/assets/models:")
+      dlog("model NOT found in bundle. Listing flutter_assets/assets/models:")
       if let res = Bundle.main.resourcePath {
         let modelsDir = (res as NSString)
           .appendingPathComponent("flutter_assets/assets/models")
         let files = (try? FileManager.default.contentsOfDirectory(atPath: modelsDir)) ?? []
-        for f in files { NSLog("\(kLogTag)   - \(f)") }
+        for f in files { dlog("  - \(f)") }
       }
       throw YoloError.modelNotFound
     }
@@ -295,13 +368,12 @@ final class YoloDetector {
     self.outScale = Float(outT.quantizationParameters?.scale ?? 1.0)
     self.outZero  = outT.quantizationParameters?.zeroPoint ?? 0
 
-    // Expected shape: [1, 300, 6]
     let oshape = outT.shape.dimensions
     if oshape.count == 3 {
       self.outRows = oshape[1]
       self.outCols = oshape[2]
     } else {
-      NSLog("\(kLogTag) UNEXPECTED output shape: \(oshape)")
+      dlog("UNEXPECTED output shape: \(oshape)")
       self.outRows = 300
       self.outCols = 6
     }
@@ -309,33 +381,30 @@ final class YoloDetector {
     self.resizeBuf = [UInt8](repeating: 0, count: inputW * inputH * 4)
     self.inputBuf  = [UInt8](repeating: 0, count: inputW * inputH * 3)
 
-    NSLog("\(kLogTag) ===== YoloDetector initialised =====")
-    NSLog("\(kLogTag) input  shape=\(inT.shape.dimensions) dtype=\(inT.dataType) scale=\(inScale) zp=\(inZero)")
-    NSLog("\(kLogTag) output shape=\(oshape) dtype=\(outT.dataType) scale=\(outScale) zp=\(outZero)")
-    NSLog("\(kLogTag) outTensorCount=\(interp.outputTensorCount) rows=\(outRows) cols=\(outCols)")
+    dlog("===== YoloDetector init =====")
+    dlog("input  shape=\(inT.shape.dimensions) dtype=\(inT.dataType) scale=\(inScale) zp=\(inZero)")
+    dlog("output shape=\(oshape) dtype=\(outT.dataType) scale=\(outScale) zp=\(outZero)")
+    dlog("outTensorCount=\(interp.outputTensorCount) rows=\(outRows) cols=\(outCols)")
   }
 
   func run(pixelBuffer: CVPixelBuffer, frameId: Int, threshold: Float) -> [[String: Any]] {
-    frameCounter &+= 1
-    let logThis = (frameCounter % kFrameLogEvery == 0)
-
+    let logThis = (frameId % 30 == 0)
     guard let inputData = preprocess(pixelBuffer, logThis: logThis) else {
-      if logThis { NSLog("\(kLogTag) preprocess returned nil") }
+      if logThis { dlog("preprocess returned nil") }
       return []
     }
-
     do {
       try interpreter.copy(inputData, toInputAt: 0)
       try interpreter.invoke()
     } catch {
-      NSLog("\(kLogTag) invoke error: \(error)")
+      dlog("invoke error: \(error)")
       return []
     }
     return decode(frameId: frameId, threshold: threshold, logThis: logThis)
   }
 
   // -----------------------------------------------------------------
-  //  Preprocess: BGRA pixel buffer -> 320x320 RGB int8 bit-pattern
+  // MARK: Preprocess
   // -----------------------------------------------------------------
   private func preprocess(_ pb: CVPixelBuffer, logThis: Bool) -> Data? {
     CVPixelBufferLockBaseAddress(pb, .readOnly)
@@ -345,11 +414,10 @@ final class YoloDetector {
     let h = CVPixelBufferGetHeight(pb)
     let stride = CVPixelBufferGetBytesPerRow(pb)
     guard let base = CVPixelBufferGetBaseAddress(pb) else {
-      NSLog("\(kLogTag) preprocess: base address nil")
+      dlog("preprocess: base address nil")
       return nil
     }
 
-    // Center-crop square.
     let side = min(w, h)
     let xOff = (w - side) / 2
     let yOff = (h - side) / 2
@@ -370,15 +438,15 @@ final class YoloDetector {
                                   vImage_Flags(kvImageHighQualityResampling))
     }
     if err != kvImageNoError {
-      NSLog("\(kLogTag) preprocess: vImageScale failed err=\(err)")
+      dlog("preprocess: vImageScale failed err=\(err)")
       return nil
     }
 
-    // BGRA(0..255) -> RGB int8 bit-pattern. Quantization is exact:
-    //   real = pixel/255
-    //   q    = round(real / scale + zp) = round(pixel/255 * 255 + (-128)) = pixel - 128
-    // Stored as Int8 bit pattern, which equals (pixel ^ 0x80) for every byte.
+    // BGRA(0..255) -> RGB int8 bit-pattern.
+    // Quantization is exact: real = pixel/255, q = real/scale + zp = pixel - 128.
+    // Stored as Int8 (UInt8 bit pattern): pixel - 128 with overflow.
     let count = inputW * inputH
+    var rSum: Int = 0, gSum: Int = 0, bSum: Int = 0
     var rMin: UInt8 = 255, rMax: UInt8 = 0
     inputBuf.withUnsafeMutableBufferPointer { dstPtr in
       resizeBuf.withUnsafeBufferPointer { srcPtr in
@@ -390,10 +458,10 @@ final class YoloDetector {
           let g = src[i * 4 + 1]
           let r = src[i * 4 + 2]
           if logThis {
+            rSum &+= Int(r); gSum &+= Int(g); bSum &+= Int(b)
             if r < rMin { rMin = r }
             if r > rMax { rMax = r }
           }
-          // pixel - 128 (overflow), gives exact int8 bit pattern.
           dst[di + 0] = r &- 128
           dst[di + 1] = g &- 128
           dst[di + 2] = b &- 128
@@ -403,18 +471,19 @@ final class YoloDetector {
     }
 
     if logThis {
-      NSLog(String(format: "\(kLogTag) preprocess src=%dx%d crop=%d resized=320x320 R range=[%d..%d]",
-                   w, h, side, rMin, rMax))
+      let n = max(1, count)
+      dlog(String(format: "preproc src=%dx%d crop=%d Rmean=%d Gmean=%d Bmean=%d Rrange=[%d..%d]",
+                  w, h, side, rSum / n, gSum / n, bSum / n, rMin, rMax))
     }
     return Data(inputBuf)
   }
 
   // -----------------------------------------------------------------
-  //  Decode: int8 [1, 300, 6] -> normalized boxes
+  // MARK: Decode
   // -----------------------------------------------------------------
   private func decode(frameId: Int, threshold: Float, logThis: Bool) -> [[String: Any]] {
     guard let out0 = try? interpreter.output(at: 0) else {
-      NSLog("\(kLogTag) decode: output(0) failed")
+      dlog("decode: output(0) failed")
       return []
     }
     let raw = [UInt8](out0.data)
@@ -423,7 +492,6 @@ final class YoloDetector {
     let scale = outScale
     let zp = Float(outZero)
 
-    // Helper: read int8 -> dequantized float.
     @inline(__always) func deq(_ idx: Int) -> Float {
       let v = Int8(bitPattern: raw[idx])
       return (Float(Int(v)) - zp) * scale
@@ -432,20 +500,20 @@ final class YoloDetector {
     var out: [[String: Any]] = []
     out.reserveCapacity(8)
     var topScore: Float = 0
-    var anyAboveZero = 0
+    var topIdx: Int = 0
+    var nAboveZero = 0
 
     for i in 0..<n {
       let base = i * k
       let conf = deq(base + 4)
-      if conf > 0.001 { anyAboveZero += 1 }
-      if conf > topScore { topScore = conf }
+      if conf > 0.001 { nAboveZero += 1 }
+      if conf > topScore { topScore = conf; topIdx = i }
       if conf < threshold { continue }
       var x1 = deq(base + 0)
       var y1 = deq(base + 1)
       var x2 = deq(base + 2)
       var y2 = deq(base + 3)
       let cls = Int(deq(base + 5).rounded())
-      // Already normalized 0..1; clamp.
       x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
       x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
       if x2 <= x1 || y2 <= y1 { continue }
@@ -457,23 +525,62 @@ final class YoloDetector {
     }
 
     if logThis {
-      NSLog(String(format: "\(kLogTag) decode rows=%d nonZero=%d topScore=%.3f kept=%d (thr=%.2f)",
-                   n, anyAboveZero, Double(topScore), out.count, Double(threshold)))
-      // Dump first row raw + dequant for diagnostics.
-      if raw.count >= k {
-        let row0: [Float] = (0..<k).map { deq($0) }
-        NSLog("\(kLogTag) decode row[0] dequant=\(row0)")
-      }
+      let b = topIdx * k
+      let row: [Float] = (0..<k).map { deq(b + $0) }
+      dlog(String(format: "decode rows=%d nonZero=%d topScore=%.3f kept=%d (thr=%.2f)",
+                  n, nAboveZero, Double(topScore), out.count, Double(threshold)))
+      dlog("decode topRow#\(topIdx)=\(row.map { String(format: "%.3f", $0) })")
     }
     return out
   }
-}
 
-private extension Data {
-  func toFloatArray() -> [Float] {
-    return withUnsafeBytes { raw -> [Float] in
-      let p = raw.bindMemory(to: Float32.self)
-      return Array(p)
+  // -----------------------------------------------------------------
+  // MARK: Self-test (synthetic checkerboard square)
+  // -----------------------------------------------------------------
+  func runSelfTest() -> String {
+    var inp = [UInt8](repeating: 0, count: inputW * inputH * 3)
+    var di = 0
+    for y in 0..<inputH {
+      for x in 0..<inputW {
+        let inSquare = (x >= 110 && x < 210 && y >= 110 && y < 210)
+        let bg: UInt8 = 230
+        var pix: UInt8
+        if inSquare {
+          let cellOn = (((x - 110) / 10 + (y - 110) / 10) & 1) == 0
+          pix = cellOn ? 0 : 16
+        } else {
+          pix = bg
+        }
+        // Already RGB (gray, all channels equal). Quant = pix - 128.
+        let q = pix &- 128
+        inp[di + 0] = q
+        inp[di + 1] = q
+        inp[di + 2] = q
+        di += 3
+      }
+    }
+    do {
+      try interpreter.copy(Data(inp), toInputAt: 0)
+      try interpreter.invoke()
+      guard let out0 = try? interpreter.output(at: 0) else { return "no out0" }
+      let raw = [UInt8](out0.data)
+      let zp = Float(outZero); let sc = outScale
+      var topScore: Float = 0
+      var topRow: [Float] = []
+      for i in 0..<outRows {
+        let b = i * outCols
+        let conf = (Float(Int(Int8(bitPattern: raw[b + 4]))) - zp) * sc
+        if conf > topScore {
+          topScore = conf
+          topRow = (0..<outCols).map { k in
+            (Float(Int(Int8(bitPattern: raw[b + k]))) - zp) * sc
+          }
+        }
+      }
+      let rs = topRow.map { String(format: "%.3f", $0) }
+      return "synthDM topScore=\(String(format: "%.3f", topScore)) topRow=\(rs)"
+    } catch {
+      return "self-test error: \(error)"
     }
   }
 }

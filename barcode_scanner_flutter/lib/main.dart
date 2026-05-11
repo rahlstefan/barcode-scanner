@@ -4,6 +4,7 @@ import 'detection.dart';
 import 'temporal_detection_buffer.dart';
 import 'bbox_painter.dart';
 import 'native_camera.dart';
+import 'debug_log_overlay.dart';
 
 void main() {
   runApp(const BarcodeScannerApp());
@@ -92,6 +93,7 @@ class _ScannerPageState extends State<ScannerPage> {
               ),
             ),
           ),
+          const DebugLogOverlay(),
         ],
       ),
     );
