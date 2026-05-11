@@ -19,7 +19,18 @@
         "android.permission.CAMERA"
       ]
     },
+    "assetBundlePatterns": [
+      "assets/models/*"
+    ],
     "plugins": [
+      [
+        "expo-asset",
+        {
+          "assets": [
+            "assets/models/yolo.tflite"
+          ]
+        }
+      ],
       [
         "react-native-vision-camera",
         {

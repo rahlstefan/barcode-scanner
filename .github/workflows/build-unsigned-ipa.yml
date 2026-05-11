@@ -91,6 +91,20 @@ jobs:
           zip -qr BarcodeScanner-unsigned.ipa Payload
           ls -lah BarcodeScanner-unsigned.ipa
 
+      - name: Verify model inside .ipa
+        working-directory: ios/build
+        run: |
+          echo "Checking embedded .tflite files in IPA..."
+          unzip -l BarcodeScanner-unsigned.ipa | grep -i '\.tflite' || true
+
+          MODEL_LINE=$(unzip -l BarcodeScanner-unsigned.ipa | grep -i 'yolo\.tflite' | head -n 1 || true)
+          if [ -z "$MODEL_LINE" ]; then
+            echo "ERROR: yolo.tflite was not found inside BarcodeScanner-unsigned.ipa"
+            exit 1
+          fi
+
+          echo "Found model entry: $MODEL_LINE"
+
       - name: Upload .ipa artifact
         uses: actions/upload-artifact@v4
         with:
