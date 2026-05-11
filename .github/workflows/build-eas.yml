@@ -1,13 +1,6 @@
-name: Build iOS with EAS
+name: Build iOS with EAS (manual, requires Apple Developer)
 
 on:
-  push:
-    branches:
-      - main
-      - develop
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       build_type:

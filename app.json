@@ -9,12 +9,15 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.barcode.scanner",
       "infoPlist": {
-        "NSCameraUsageDescription": "Доступ к камере необходим для сканирования штрих-кодов и DataMatrix"
+        "NSCameraUsageDescription": "Доступ к камере необходим для сканирования штрих-кодов",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
       "package": "com.barcode.scanner",
-      "permissions": ["android.permission.CAMERA"]
+      "permissions": [
+        "android.permission.CAMERA"
+      ]
     },
     "plugins": [
       [

@@ -1,15 +1,6 @@
-name: Build & Deploy iOS
+name: Build & Deploy iOS (manual, requires Apple Developer)
 
 on:
-  push:
-    branches:
-      - main
-      - develop
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:

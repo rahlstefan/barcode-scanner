@@ -1,0 +1,103 @@
+name: Build Unsigned iOS .ipa (for Sideloadly)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'App.tsx'
+      - 'app.json'
+      - 'package.json'
+      - 'assets/models/**'
+      - '.github/workflows/build-unsigned-ipa.yml'
+
+jobs:
+  build-ios-unsigned:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Ruby (for CocoaPods)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Install npm dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Install CocoaPods
+        run: gem install cocoapods -v 1.15.2
+
+      - name: Run expo prebuild
+        run: npx expo prebuild --platform ios --no-install --clean
+
+      - name: Pod install
+        working-directory: ios
+        run: pod install --repo-update
+
+      - name: Get scheme name
+        id: scheme
+        working-directory: ios
+        run: |
+          SCHEME=$(xcodebuild -workspace BarcodeScanner.xcworkspace -list -json | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['workspace']['schemes'][0])")
+          echo "scheme=$SCHEME" >> $GITHUB_OUTPUT
+          echo "Scheme: $SCHEME"
+
+      - name: Build archive (unsigned)
+        working-directory: ios
+        run: |
+          xcodebuild \
+            -workspace BarcodeScanner.xcworkspace \
+            -scheme "${{ steps.scheme.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath build/BarcodeScanner.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Package unsigned .ipa
+        working-directory: ios/build
+        run: |
+          mkdir -p Payload
+          cp -r BarcodeScanner.xcarchive/Products/Applications/*.app Payload/
+          zip -qr BarcodeScanner-unsigned.ipa Payload
+          ls -lah BarcodeScanner-unsigned.ipa
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BarcodeScanner-unsigned-ipa
+          path: ios/build/BarcodeScanner-unsigned.ipa
+          retention-days: 14
+
+      - name: Summary
+        run: |
+          echo "## ✅ Unsigned .ipa собран" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Скачайте артефакт **BarcodeScanner-unsigned-ipa** из этого run." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Установка через Sideloadly:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Подключите iPhone к ПК" >> $GITHUB_STEP_SUMMARY
+          echo "2. Откройте Sideloadly" >> $GITHUB_STEP_SUMMARY
+          echo "3. Перетащите \`BarcodeScanner-unsigned.ipa\`" >> $GITHUB_STEP_SUMMARY
+          echo "4. Введите ваш free Apple ID + App-Specific Password" >> $GITHUB_STEP_SUMMARY
+          echo "5. Start → дождитесь установки" >> $GITHUB_STEP_SUMMARY
+          echo "6. На iPhone: Settings → General → VPN & Device Management → доверяйте сертификату" >> $GITHUB_STEP_SUMMARY
