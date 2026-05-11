@@ -314,7 +314,12 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 }
 
 // ---------------------------------------------------------------------
-// MARK: - YOLO FULL int8 detector
+// MARK: - YOLO float32 detector (best_float16.tflite)
+//   - TFLiteSwift 2.14 lacks an `int8` case in Tensor.DataType, so we
+//     ship the float16 model whose I/O is float32 (weights are fp16).
+//   - input  : float32 [1,320,320,3]   pixel/255
+//   - output : float32 [1,300,6]       NMS embedded
+//              layout per row: x1, y1, x2, y2, score, cls (coords 0..1)
 // ---------------------------------------------------------------------
 
 enum YoloError: Error { case modelNotFound, allocFailed, badTensor }
@@ -326,13 +331,7 @@ final class YoloDetector {
 
   // Reusable buffers.
   private var resizeBuf: [UInt8]              // 320x320 BGRA
-  private var inputBuf: [UInt8]               // 320x320x3 packed RGB int8 bit-pattern
-
-  // Quant params.
-  private let inScale: Float
-  private let inZero: Int
-  private let outScale: Float
-  private let outZero: Int
+  private var inputBuf: [Float32]             // 320x320x3 packed RGB float
 
   // Output shape.
   private let outRows: Int    // 300
@@ -344,8 +343,8 @@ final class YoloDetector {
     // pubspec asset path -> bundle resource key, then resolve via
     // Bundle.main.path(forResource:ofType:).
     let assetCandidates = [
-      "assets/models/best_full_integer_quant.tflite",
-      "assets/models/best_int8.tflite",
+      "assets/models/best_float16.tflite",
+      "assets/models/best_float32.tflite",
     ]
     var resolved: String? = nil
     for asset in assetCandidates {
@@ -365,30 +364,17 @@ final class YoloDetector {
       let frameworksDir = (Bundle.main.bundlePath as NSString)
         .appendingPathComponent("Frameworks")
       if let frameworks = try? fm.contentsOfDirectory(atPath: frameworksDir) {
-        for fw in frameworks where fw.hasSuffix(".framework") {
-          let candidate = (frameworksDir as NSString)
-            .appendingPathComponent(fw)
-            .appending("/flutter_assets/assets/models/best_full_integer_quant.tflite")
-          if fm.fileExists(atPath: candidate) {
-            dlog("model resolved via framework scan: \(candidate)")
-            resolved = candidate
-            break
+        outer: for fw in frameworks where fw.hasSuffix(".framework") {
+          for name in ["best_float16.tflite", "best_float32.tflite"] {
+            let candidate = (frameworksDir as NSString)
+              .appendingPathComponent(fw)
+              .appending("/flutter_assets/assets/models/\(name)")
+            if fm.fileExists(atPath: candidate) {
+              dlog("model resolved via framework scan: \(candidate)")
+              resolved = candidate
+              break outer
+            }
           }
-        }
-      }
-    }
-
-    // Fallback 2: legacy Bundle.main.path(forResource:inDirectory:).
-    if resolved == nil {
-      let legacy: [(String, String?)] = [
-        ("best_full_integer_quant", "flutter_assets/assets/models"),
-        ("best_full_integer_quant", nil),
-      ]
-      for (name, dir) in legacy {
-        if let p = Bundle.main.path(forResource: name, ofType: "tflite", inDirectory: dir) {
-          dlog("model resolved via legacy lookup: \(p)")
-          resolved = p
-          break
         }
       }
     }
@@ -430,35 +416,11 @@ final class YoloDetector {
     dlog("step3: inputTensorCount=\(interp.inputTensorCount) outputTensorCount=\(interp.outputTensorCount)")
 
     let inT: Tensor
-    do {
-      dlog("step4: input(at:0)")
-      inT = try interp.input(at: 0)
-    } catch {
-      dlog("step4 FAILED reading input(0): \(error)")
-      throw error
-    }
+    do { inT = try interp.input(at: 0) }
+    catch { dlog("step4 FAILED reading input(0): \(error)"); throw error }
     let outT: Tensor
-    do {
-      dlog("step5: output(at:0)")
-      outT = try interp.output(at: 0)
-    } catch {
-      dlog("step5 FAILED reading output(0): \(error)")
-      // Try every output to find which one is bad / good.
-      for i in 0..<interp.outputTensorCount {
-        do {
-          let t = try interp.output(at: i)
-          dlog("  output[\(i)] OK shape=\(t.shape.dimensions) dtype=\(t.dataType)")
-        } catch {
-          dlog("  output[\(i)] FAIL \(error)")
-        }
-      }
-      throw error
-    }
-
-    self.inScale = Float(inT.quantizationParameters?.scale ?? (1.0 / 255.0))
-    self.inZero  = inT.quantizationParameters?.zeroPoint ?? -128
-    self.outScale = Float(outT.quantizationParameters?.scale ?? 1.0)
-    self.outZero  = outT.quantizationParameters?.zeroPoint ?? 0
+    do { outT = try interp.output(at: 0) }
+    catch { dlog("step5 FAILED reading output(0): \(error)"); throw error }
 
     let oshape = outT.shape.dimensions
     if oshape.count == 3 {
@@ -471,12 +433,12 @@ final class YoloDetector {
     }
 
     self.resizeBuf = [UInt8](repeating: 0, count: inputW * inputH * 4)
-    self.inputBuf  = [UInt8](repeating: 0, count: inputW * inputH * 3)
+    self.inputBuf  = [Float32](repeating: 0, count: inputW * inputH * 3)
 
     dlog("===== YoloDetector init =====")
-    dlog("input  shape=\(inT.shape.dimensions) dtype=\(inT.dataType) scale=\(inScale) zp=\(inZero)")
-    dlog("output shape=\(oshape) dtype=\(outT.dataType) scale=\(outScale) zp=\(outZero)")
-    dlog("outTensorCount=\(interp.outputTensorCount) rows=\(outRows) cols=\(outCols)")
+    dlog("input  shape=\(inT.shape.dimensions) dtype=\(inT.dataType)")
+    dlog("output shape=\(oshape) dtype=\(outT.dataType)")
+    dlog("rows=\(outRows) cols=\(outCols)")
   }
 
   func run(pixelBuffer: CVPixelBuffer, frameId: Int, threshold: Float) -> [[String: Any]] {
@@ -496,7 +458,7 @@ final class YoloDetector {
   }
 
   // -----------------------------------------------------------------
-  // MARK: Preprocess
+  // MARK: Preprocess  -> Float32 RGB normalized [0..1]
   // -----------------------------------------------------------------
   private func preprocess(_ pb: CVPixelBuffer, logThis: Bool) -> Data? {
     CVPixelBufferLockBaseAddress(pb, .readOnly)
@@ -534,12 +496,11 @@ final class YoloDetector {
       return nil
     }
 
-    // BGRA(0..255) -> RGB int8 bit-pattern.
-    // Quantization is exact: real = pixel/255, q = real/scale + zp = pixel - 128.
-    // Stored as Int8 (UInt8 bit pattern): pixel - 128 with overflow.
+    // BGRA(0..255) -> RGB float32 (0..1).
     let count = inputW * inputH
     var rSum: Int = 0, gSum: Int = 0, bSum: Int = 0
     var rMin: UInt8 = 255, rMax: UInt8 = 0
+    let inv: Float = 1.0 / 255.0
     inputBuf.withUnsafeMutableBufferPointer { dstPtr in
       resizeBuf.withUnsafeBufferPointer { srcPtr in
         let src = srcPtr.baseAddress!
@@ -554,9 +515,9 @@ final class YoloDetector {
             if r < rMin { rMin = r }
             if r > rMax { rMax = r }
           }
-          dst[di + 0] = r &- 128
-          dst[di + 1] = g &- 128
-          dst[di + 2] = b &- 128
+          dst[di + 0] = Float(r) * inv
+          dst[di + 1] = Float(g) * inv
+          dst[di + 2] = Float(b) * inv
           di += 3
         }
       }
@@ -567,7 +528,7 @@ final class YoloDetector {
       dlog(String(format: "preproc src=%dx%d crop=%d Rmean=%d Gmean=%d Bmean=%d Rrange=[%d..%d]",
                   w, h, side, rSum / n, gSum / n, bSum / n, rMin, rMax))
     }
-    return Data(inputBuf)
+    return inputBuf.withUnsafeBufferPointer { Data(buffer: $0) }
   }
 
   // -----------------------------------------------------------------
@@ -578,15 +539,17 @@ final class YoloDetector {
       dlog("decode: output(0) failed")
       return []
     }
-    let raw = [UInt8](out0.data)
     let n = outRows
     let k = outCols
-    let scale = outScale
-    let zp = Float(outZero)
+    let total = n * k
 
-    @inline(__always) func deq(_ idx: Int) -> Float {
-      let v = Int8(bitPattern: raw[idx])
-      return (Float(Int(v)) - zp) * scale
+    let floats: [Float] = out0.data.withUnsafeBytes { raw -> [Float] in
+      let p = raw.bindMemory(to: Float32.self)
+      return Array(UnsafeBufferPointer(start: p.baseAddress, count: min(p.count, total)))
+    }
+    if floats.count < total {
+      dlog("decode: short output \(floats.count) < \(total)")
+      return []
     }
 
     var out: [[String: Any]] = []
@@ -597,15 +560,15 @@ final class YoloDetector {
 
     for i in 0..<n {
       let base = i * k
-      let conf = deq(base + 4)
+      let conf = floats[base + 4]
       if conf > 0.001 { nAboveZero += 1 }
       if conf > topScore { topScore = conf; topIdx = i }
       if conf < threshold { continue }
-      var x1 = deq(base + 0)
-      var y1 = deq(base + 1)
-      var x2 = deq(base + 2)
-      var y2 = deq(base + 3)
-      let cls = Int(deq(base + 5).rounded())
+      var x1 = floats[base + 0]
+      var y1 = floats[base + 1]
+      var x2 = floats[base + 2]
+      var y2 = floats[base + 3]
+      let cls = Int(floats[base + 5].rounded())
       x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
       x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
       if x2 <= x1 || y2 <= y1 { continue }
@@ -618,7 +581,7 @@ final class YoloDetector {
 
     if logThis {
       let b = topIdx * k
-      let row: [Float] = (0..<k).map { deq(b + $0) }
+      let row: [Float] = (0..<k).map { floats[b + $0] }
       dlog(String(format: "decode rows=%d nonZero=%d topScore=%.3f kept=%d (thr=%.2f)",
                   n, nAboveZero, Double(topScore), out.count, Double(threshold)))
       dlog("decode topRow#\(topIdx)=\(row.map { String(format: "%.3f", $0) })")
@@ -630,43 +593,40 @@ final class YoloDetector {
   // MARK: Self-test (synthetic checkerboard square)
   // -----------------------------------------------------------------
   func runSelfTest() -> String {
-    var inp = [UInt8](repeating: 0, count: inputW * inputH * 3)
+    var inp = [Float32](repeating: 0, count: inputW * inputH * 3)
     var di = 0
     for y in 0..<inputH {
       for x in 0..<inputW {
         let inSquare = (x >= 110 && x < 210 && y >= 110 && y < 210)
-        let bg: UInt8 = 230
-        var pix: UInt8
+        var pix: Float = 0.9
         if inSquare {
           let cellOn = (((x - 110) / 10 + (y - 110) / 10) & 1) == 0
-          pix = cellOn ? 0 : 16
-        } else {
-          pix = bg
+          pix = cellOn ? 0.0 : 0.06
         }
-        // Already RGB (gray, all channels equal). Quant = pix - 128.
-        let q = pix &- 128
-        inp[di + 0] = q
-        inp[di + 1] = q
-        inp[di + 2] = q
+        inp[di + 0] = pix
+        inp[di + 1] = pix
+        inp[di + 2] = pix
         di += 3
       }
     }
     do {
-      try interpreter.copy(Data(inp), toInputAt: 0)
+      let data = inp.withUnsafeBufferPointer { Data(buffer: $0) }
+      try interpreter.copy(data, toInputAt: 0)
       try interpreter.invoke()
       guard let out0 = try? interpreter.output(at: 0) else { return "no out0" }
-      let raw = [UInt8](out0.data)
-      let zp = Float(outZero); let sc = outScale
+      let total = outRows * outCols
+      let floats: [Float] = out0.data.withUnsafeBytes { raw -> [Float] in
+        let p = raw.bindMemory(to: Float32.self)
+        return Array(UnsafeBufferPointer(start: p.baseAddress, count: min(p.count, total)))
+      }
       var topScore: Float = 0
       var topRow: [Float] = []
       for i in 0..<outRows {
         let b = i * outCols
-        let conf = (Float(Int(Int8(bitPattern: raw[b + 4]))) - zp) * sc
+        let conf = floats[b + 4]
         if conf > topScore {
           topScore = conf
-          topRow = (0..<outCols).map { k in
-            (Float(Int(Int8(bitPattern: raw[b + k]))) - zp) * sc
-          }
+          topRow = (0..<outCols).map { floats[b + $0] }
         }
       }
       let rs = topRow.map { String(format: "%.3f", $0) }
