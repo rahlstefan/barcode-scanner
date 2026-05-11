@@ -27,3 +27,10 @@ ios/build/
 # Generated files
 ios/GeneratedPluginRegistrant.m
 ios/GeneratedPluginRegistrant.swift
+*.json.tmp
+b.json
+nb.json
+build.json
+builds.json
+build.log
+log*.txt

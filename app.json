@@ -9,14 +9,23 @@
       "supportsTablet": false,
       "bundleIdentifier": "com.barcode.scanner",
       "infoPlist": {
-        "NSCameraUsageDescription": "Необходимо для сканирования кодов"
+        "NSCameraUsageDescription": "Доступ к камере необходим для сканирования штрих-кодов и DataMatrix"
       }
     },
     "android": {
-      "package": "com.barcode.scanner"
+      "package": "com.barcode.scanner",
+      "permissions": ["android.permission.CAMERA"]
     },
     "plugins": [
-      "expo-camera"
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "Доступ к камере необходим для сканирования штрих-кодов",
+          "enableCodeScanner": false,
+          "enableLocation": false
+        }
+      ],
+      "react-native-worklets-core"
     ],
     "extra": {
       "eas": {
