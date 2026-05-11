@@ -21,6 +21,8 @@ import { ensureModelCached } from './src/utils/modelLoader';
 import { TemporalDetectionBuffer } from './src/utils/TemporalDetectionBuffer';
 import { Detection, SmoothedDetection } from './src/types';
 
+// Model loads from GitHub cache on first run
+
 const MODEL_INPUT_SIZE = 320;
 const SCORE_THRESHOLD = 0.4;
 const SCREEN = Dimensions.get('window');
