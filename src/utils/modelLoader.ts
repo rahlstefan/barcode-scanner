@@ -2,8 +2,8 @@ import { cacheDirectory, downloadAsync, getInfoAsync } from 'expo-file-system/le
 
 // Модель хранится в GitHub репозитории и скачивается один раз при первом запуске.
 const MODEL_DOWNLOAD_URL =
-  'https://raw.githubusercontent.com/rahlstefan/barcode-scanner/main/assets/models/yolo.tflite';
-const MODEL_CACHE_FILENAME = 'yolo-model-v2.tflite';
+  'https://raw.githubusercontent.com/rahlstefan/barcode-scanner/main/assets/models/best_full_integer_quant.tflite';
+const MODEL_CACHE_FILENAME = 'yolo-model-int8-v1.tflite';
 
 /**
  * Скачивает модель один раз и кеширует.
