@@ -1,0 +1,99 @@
+name: Build Unsigned iOS .ipa (Flutter)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "barcode_scanner_flutter/**"
+      - ".github/workflows/build-unsigned-ipa-flutter.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: barcode_scanner_flutter
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.24.5
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Generate platform scaffolding
+        # `flutter create .` is idempotent: it ONLY adds missing files and does
+        # not overwrite our pubspec.yaml, lib/, ios/Runner/AppDelegate.swift,
+        # ios/Podfile, or assets.
+        run: |
+          flutter create \
+            --org com.bboxfix \
+            --project-name barcode_scanner_flutter \
+            --platforms=ios \
+            .
+
+      - name: Patch Info.plist (camera permission + portrait only)
+        run: |
+          PLIST=ios/Runner/Info.plist
+          /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Camera is required to scan DataMatrix codes.'" "$PLIST" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'Camera is required to scan DataMatrix codes.'" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 'DMTX Scanner'" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Delete :UISupportedInterfaceOrientations" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UISupportedInterfaceOrientations:0 string UIInterfaceOrientationPortrait" "$PLIST"
+          echo '--- Info.plist after patch ---'
+          /usr/libexec/PlistBuddy -c "Print" "$PLIST"
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Pod install
+        run: |
+          cd ios
+          pod repo update
+          pod install --verbose
+          cd ..
+
+      - name: Build iOS (no codesign)
+        run: |
+          flutter build ios --release --no-codesign --verbose
+
+      - name: Repackage as unsigned .ipa
+        run: |
+          set -e
+          APP_PATH="build/ios/iphoneos/Runner.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Runner.app not found at $APP_PATH"
+            ls -la build/ios/iphoneos || true
+            exit 1
+          fi
+          rm -rf Payload
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/Runner.app
+          # Sanity: model bundled?
+          if [ -f Payload/Runner.app/Frameworks/App.framework/flutter_assets/assets/models/best_int8.tflite ]; then
+            echo "Model size: $(stat -f%z Payload/Runner.app/Frameworks/App.framework/flutter_assets/assets/models/best_int8.tflite) bytes"
+          else
+            echo "WARN: model not at expected path; listing flutter_assets:"
+            find Payload/Runner.app -name 'best_int8.tflite' -print || true
+          fi
+          zip -qry DMTXScanner-unsigned.ipa Payload
+          ls -la DMTXScanner-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DMTXScanner-unsigned-ipa
+          path: barcode_scanner_flutter/DMTXScanner-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
