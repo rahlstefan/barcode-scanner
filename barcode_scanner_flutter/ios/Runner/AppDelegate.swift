@@ -335,9 +335,12 @@ final class YoloDetector {
         n = shape[2]; stride = 1; strideAttr = n; layoutNxK = false
       }
       let raw = [UInt8](out0.data)
-      // Detect dtype: TensorFlowLite swift exposes dataType via tensor.
-      let isInt8 = (out0.dataType == .int8)
-      let isUInt8 = (out0.dataType == .uInt8)
+      // Detect dtype via string description (TFLite 2.14 Swift enum
+      // does not expose .int8 publicly on all builds; using `String(describing:)`
+      // works for .int8/.uInt8/.float32 alike).
+      let dtypeStr = String(describing: out0.dataType)
+      let isInt8 = dtypeStr.contains("int8") && !dtypeStr.contains("uInt8") && !dtypeStr.contains("UInt8")
+      let isUInt8 = dtypeStr.lowercased().contains("uint8")
       func getF(_ idx: Int) -> Float {
         if isInt8 {
           let v = Int8(bitPattern: raw[idx])
