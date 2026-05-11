@@ -87,6 +87,13 @@ jobs:
           echo '--- ios/Podfile ---'
           cat ios/Podfile
 
+      - name: Bump Runner deployment target to iOS 13.0
+        # Flutter 3.24 scaffolds Runner.xcodeproj with iOS 12.0; TFLiteSwift
+        # 2.14 requires iOS 13.0. Patch the project file directly.
+        run: |
+          sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 12.0;/IPHONEOS_DEPLOYMENT_TARGET = 13.0;/g" ios/Runner.xcodeproj/project.pbxproj
+          grep IPHONEOS_DEPLOYMENT_TARGET ios/Runner.xcodeproj/project.pbxproj
+
       - name: Pod install
         run: |
           cd ios
