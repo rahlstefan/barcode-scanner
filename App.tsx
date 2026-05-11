@@ -7,7 +7,6 @@ import {
   ActivityIndicator,
   ScrollView,
   Dimensions,
-  Platform,
 } from 'react-native';
 import {
   Camera,
@@ -18,7 +17,7 @@ import {
 import { loadTensorflowModel, TensorflowModel } from 'react-native-fast-tflite';
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import { Worklets } from 'react-native-worklets-core';
-import { bundleDirectory } from 'expo-file-system/legacy';
+import { ensureModelCached } from './src/utils/modelLoader';
 import { TemporalDetectionBuffer } from './src/utils/TemporalDetectionBuffer';
 import { Detection, SmoothedDetection } from './src/types';
 
@@ -48,60 +47,21 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    const loadModelWithFallbacks = async () => {
+
+    const initializeModel = async () => {
       try {
         setModelLoadState('loading');
         setModelError(null);
 
-        const attempts: Array<{ label: string; source: number | { url: string } }> = [
-          { label: 'require(./assets/models/yolo.tflite)', source: require('./assets/models/yolo.tflite') as number },
-        ];
+        // Скачивает с GitHub один раз, потом работает из кеша
+        const modelPath = await ensureModelCached();
 
-        if (Platform.OS === 'ios' && bundleDirectory) {
-          const normalizedBundleDir = bundleDirectory.endsWith('/')
-            ? bundleDirectory
-            : `${bundleDirectory}/`;
-          const bundleUrl = normalizedBundleDir.startsWith('file://')
-            ? normalizedBundleDir
-            : `file://${normalizedBundleDir}`;
-
-          // В iOS bundle путь может резолвиться по-разному между сборками.
-          const relCandidates = [
-            'assets/assets/models/yolo.tflite',
-            'assets/models/yolo.tflite',
-            'yolo.tflite',
-          ];
-
-          for (const rel of relCandidates) {
-            attempts.push({
-              label: `bundle-url:${rel}`,
-              source: { url: `${bundleUrl}${rel}` },
-            });
-            attempts.push({
-              label: `bundle-path:${rel}`,
-              source: { url: `${normalizedBundleDir}${rel}` },
-            });
-          }
-        }
-
-        const errors: string[] = [];
-        for (const attempt of attempts) {
-          try {
-            const loaded = await loadTensorflowModel(attempt.source);
-            if (!cancelled) {
-              setActualModel(loaded);
-              setModelLoadState('loaded');
-            }
-            return;
-          } catch (e: any) {
-            errors.push(`${attempt.label}: ${String(e?.message ?? e)}`);
-          }
-        }
+        // Загружаем TFLite из cached файла
+        const model = await loadTensorflowModel({ url: modelPath });
 
         if (!cancelled) {
-          setActualModel(undefined);
-          setModelLoadState('error');
-          setModelError(errors.join('\n\n'));
+          setActualModel(model);
+          setModelLoadState('loaded');
         }
       } catch (e: any) {
         if (!cancelled) {
@@ -112,7 +72,7 @@ export default function App() {
       }
     };
 
-    loadModelWithFallbacks();
+    initializeModel();
     return () => {
       cancelled = true;
     };
