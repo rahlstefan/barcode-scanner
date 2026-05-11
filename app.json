@@ -29,26 +29,23 @@
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#000000"
-      }
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-camera",
-      [
-        "expo-modules-autolinking",
-        {
-          "modules": [
-            "./modules/barcode-detector"
-          ]
-        }
-      ]
+      "expo-camera"
     ],
     "extra": {
       "eas": {
-        "projectId": "barcode-scanner"
+        "projectId": "57090696-9519-4741-8d78-752b2d37c9e4"
       }
-    }
+    },
+    "owner": "tiltmachinegun"
   }
 }
