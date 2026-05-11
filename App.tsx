@@ -15,15 +15,10 @@ import {
   useCameraPermission,
   useFrameProcessor,
 } from 'react-native-vision-camera';
-import { useTensorflowModel } from 'react-native-fast-tflite';
+import { loadTensorflowModel, TensorflowModel } from 'react-native-fast-tflite';
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import { Worklets } from 'react-native-worklets-core';
-import {
-  bundleDirectory,
-  cacheDirectory,
-  copyAsync,
-  getInfoAsync,
-} from 'expo-file-system/legacy';
+import { bundleDirectory } from 'expo-file-system/legacy';
 import { TemporalDetectionBuffer } from './src/utils/TemporalDetectionBuffer';
 import { Detection, SmoothedDetection } from './src/types';
 
@@ -45,77 +40,83 @@ export default function App() {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
 
-  const [modelSourceReady, setModelSourceReady] = useState(
-    Platform.OS !== 'ios'
-  );
-  const [modelSourceError, setModelSourceError] = useState<string | null>(null);
-  const [modelSource, setModelSource] = useState<number | { url: string }>(() =>
-    Platform.OS === 'ios' ? { url: '' } : (require('./assets/models/yolo.tflite') as number)
+  const [modelLoadState, setModelLoadState] = useState<'loading' | 'loaded' | 'error'>('loading');
+  const [modelError, setModelError] = useState<string | null>(null);
+  const [actualModel, setActualModel] = useState<TensorflowModel | undefined>(
+    undefined
   );
 
   useEffect(() => {
-    if (Platform.OS !== 'ios') return;
-
     let cancelled = false;
-    const resolveModelSource = async () => {
+    const loadModelWithFallbacks = async () => {
       try {
-        if (!bundleDirectory) {
-          throw new Error('bundleDirectory недоступен');
-        }
+        setModelLoadState('loading');
+        setModelError(null);
 
-        // В разных сборках Metro может положить файл в разные подпапки.
-        const candidates = [
-          `${bundleDirectory}assets/assets/models/yolo.tflite`,
-          `${bundleDirectory}assets/models/yolo.tflite`,
-          `${bundleDirectory}yolo.tflite`,
+        const attempts: Array<{ label: string; source: number | { url: string } }> = [
+          { label: 'require(./assets/models/yolo.tflite)', source: require('./assets/models/yolo.tflite') as number },
         ];
 
-        let sourceInBundle: string | null = null;
-        for (const uri of candidates) {
-          const info = await getInfoAsync(uri);
-          if (info.exists) {
-            sourceInBundle = uri;
-            break;
+        if (Platform.OS === 'ios' && bundleDirectory) {
+          const normalizedBundleDir = bundleDirectory.endsWith('/')
+            ? bundleDirectory
+            : `${bundleDirectory}/`;
+          const bundleUrl = normalizedBundleDir.startsWith('file://')
+            ? normalizedBundleDir
+            : `file://${normalizedBundleDir}`;
+
+          // В iOS bundle путь может резолвиться по-разному между сборками.
+          const relCandidates = [
+            'assets/assets/models/yolo.tflite',
+            'assets/models/yolo.tflite',
+            'yolo.tflite',
+          ];
+
+          for (const rel of relCandidates) {
+            attempts.push({
+              label: `bundle-url:${rel}`,
+              source: { url: `${bundleUrl}${rel}` },
+            });
+            attempts.push({
+              label: `bundle-path:${rel}`,
+              source: { url: `${normalizedBundleDir}${rel}` },
+            });
           }
         }
 
-        if (!sourceInBundle) {
-          throw new Error(`Модель не найдена в bundle. Проверены пути: ${candidates.join(', ')}`);
-        }
-
-        // Читаем через cache URI: это надёжнее для нативной загрузки TFLite.
-        if (cacheDirectory) {
-          const cacheUri = `${cacheDirectory}yolo-runtime.tflite`;
-          await copyAsync({ from: sourceInBundle, to: cacheUri });
-          const copied = await getInfoAsync(cacheUri);
-          if (copied.exists) {
+        const errors: string[] = [];
+        for (const attempt of attempts) {
+          try {
+            const loaded = await loadTensorflowModel(attempt.source);
             if (!cancelled) {
-              setModelSource({ url: cacheUri });
-              setModelSourceReady(true);
+              setActualModel(loaded);
+              setModelLoadState('loaded');
             }
             return;
+          } catch (e: any) {
+            errors.push(`${attempt.label}: ${String(e?.message ?? e)}`);
           }
         }
 
         if (!cancelled) {
-          setModelSource({ url: sourceInBundle });
-          setModelSourceReady(true);
+          setActualModel(undefined);
+          setModelLoadState('error');
+          setModelError(errors.join('\n\n'));
         }
       } catch (e: any) {
         if (!cancelled) {
-          setModelSourceError(String(e?.message ?? e));
-          setModelSourceReady(true);
+          setActualModel(undefined);
+          setModelLoadState('error');
+          setModelError(String(e?.message ?? e));
         }
       }
     };
 
-    resolveModelSource();
+    loadModelWithFallbacks();
     return () => {
       cancelled = true;
     };
   }, []);
-
-  const model = useTensorflowModel(modelSource);
   const { resize } = useResizePlugin();
 
   const [detections, setDetections] = useState<SmoothedDetection[]>([]);
@@ -227,8 +228,6 @@ export default function App() {
 
   const onRawDetectionsJS = Worklets.createRunOnJS(onRawDetections);
 
-  const actualModel = model.state === 'loaded' ? model.model : undefined;
-
   const frameProcessor = useFrameProcessor(
     (frame) => {
       'worklet';
@@ -292,31 +291,20 @@ export default function App() {
     );
   }
 
-  if (modelSourceError) {
+  if (modelLoadState === 'error') {
     return (
       <View style={styles.center}>
-        <Text style={[styles.statusText, { color: '#f44' }]}>Ошибка поиска модели:</Text>
-        <Text style={styles.errorText}>{modelSourceError}</Text>
+        <Text style={[styles.statusText, { color: '#f44' }]}>Ошибка загрузки модели:</Text>
+        <Text style={styles.errorText}>{modelError}</Text>
       </View>
     );
   }
 
-  if (!modelSourceReady || model.state === 'loading') {
+  if (modelLoadState === 'loading') {
     return (
       <View style={styles.center}>
         <ActivityIndicator color="#0f0" size="large" />
         <Text style={styles.statusText}>Загрузка YOLO модели...</Text>
-      </View>
-    );
-  }
-
-  if (model.state === 'error') {
-    return (
-      <View style={styles.center}>
-        <Text style={[styles.statusText, { color: '#f44' }]}>
-          Ошибка загрузки модели:
-        </Text>
-        <Text style={styles.errorText}>{String(model.error)}</Text>
       </View>
     );
   }
