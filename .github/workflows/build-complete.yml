@@ -67,22 +67,3 @@ jobs:
         run: |
           echo "✅ Build completed successfully!"
           echo "Download: https://expo.dev/builds"
-      
-      - name: 📧 Slack notification (опционально)
-        if: ${{ secrets.SLACK_WEBHOOK != '' }}
-        uses: slackapi/slack-github-action@v1
-        with:
-          webhook-url: ${{ secrets.SLACK_WEBHOOK }}
-          payload: |
-            {
-              "text": "✅ BarcodeScanner build completed",
-              "blocks": [
-                {
-                  "type": "section",
-                  "text": {
-                    "type": "mrkdwn",
-                    "text": "🎉 *Build Successful*\n\nCommit: ${{ github.sha }}\nBranch: ${{ github.ref }}"
-                  }
-                }
-              ]
-            }
