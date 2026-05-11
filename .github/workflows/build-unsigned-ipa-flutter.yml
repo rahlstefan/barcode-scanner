@@ -57,23 +57,6 @@ jobs:
           cp ../_overrides/ios/Runner/AppDelegate.swift ios/Runner/AppDelegate.swift
           ls ios/Runner
 
-      - name: Inject TensorFlowLiteSwift into generated Podfile
-        run: |
-          PODFILE=ios/Podfile
-          python3 -c "
-          import sys, re, io
-          p = 'ios/Podfile'
-          s = open(p).read()
-          s = re.sub(r'^# *platform :ios.*', \"platform :ios, '13.0'\", s, count=1, flags=re.M)
-          if 'platform :ios' not in s:
-              s = \"platform :ios, '13.0'\n\" + s
-          if 'TensorFlowLiteSwift' not in s:
-              s = re.sub(r\"(target 'Runner' do\s*\n)\", r\"\1  pod 'TensorFlowLiteSwift', '~> 2.14.0'\n\", s, count=1)
-          open(p, 'w').write(s)
-          "
-          echo '--- Podfile after patch ---'
-          cat ios/Podfile
-
       - name: Patch Info.plist (camera permission + portrait only)
         run: |
           PLIST=ios/Runner/Info.plist
@@ -89,10 +72,19 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
-      - name: Generate ios/Flutter/Generated.xcconfig
-        # `pod install` requires Generated.xcconfig. It is produced by
-        # `flutter build ios --config-only`, NOT by `flutter pub get`.
-        run: flutter build ios --config-only --no-codesign --release
+      - name: Generate ios/Flutter/Generated.xcconfig + Podfile
+        # `pod install` requires Generated.xcconfig AND ios/Podfile. Both are
+        # produced by `flutter build ios --config-only` (NOT by `flutter create`
+        # or `flutter pub get`).
+        run: |
+          flutter build ios --config-only --no-codesign --release || true
+          echo '--- ios/ tree after config-only ---'
+          ls -la ios
+          test -f ios/Podfile || (echo 'ERROR: ios/Podfile still missing'; exit 1)
+          test -f ios/Flutter/Generated.xcconfig || (echo 'ERROR: Generated.xcconfig missing'; exit 1)
+
+      - name: Inject TensorFlowLiteSwift into generated Podfile
+        run: python3 ci/patch_podfile.py
 
       - name: Pod install
         run: |
