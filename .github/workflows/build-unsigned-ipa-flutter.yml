@@ -53,10 +53,35 @@ jobs:
 
       - name: Restore custom iOS overrides on top of scaffolding
         run: |
-          # Overlay AppDelegate.swift and Podfile from our stash.
+          # Overlay AppDelegate.swift from our stash (do NOT touch generated Podfile).
           cp ../_overrides/ios/Runner/AppDelegate.swift ios/Runner/AppDelegate.swift
-          cp ../_overrides/ios/Podfile ios/Podfile
           ls ios/Runner
+
+      - name: Inject TensorFlowLiteSwift into generated Podfile
+        run: |
+          PODFILE=ios/Podfile
+          # Set platform to 13.0 (default may be 12.0).
+          if grep -q "^# platform :ios" "$PODFILE"; then
+            sed -i '' "s/^# platform :ios.*/platform :ios, '13.0'/" "$PODFILE"
+          elif grep -q "^platform :ios" "$PODFILE"; then
+            sed -i '' "s/^platform :ios.*/platform :ios, '13.0'/" "$PODFILE"
+          else
+            printf "platform :ios, '13.0'\n%s\n" "$(cat $PODFILE)" > "$PODFILE"
+          fi
+          # Add TFLite pod inside the Runner target.
+          if ! grep -q "TensorFlowLiteSwift" "$PODFILE"; then
+            python3 - "$PODFILE" <<'PY'
+import sys, re
+p = sys.argv[1]
+src = open(p).read()
+pod_line = "  pod 'TensorFlowLiteSwift', '~> 2.14.0'\n"
+# Insert right after `target 'Runner' do`.
+new = re.sub(r"(target 'Runner' do\s*\n)", r"\1" + pod_line, src, count=1)
+open(p, 'w').write(new)
+PY
+          fi
+          echo '--- Podfile after patch ---'
+          cat "$PODFILE"
 
       - name: Patch Info.plist (camera permission + portrait only)
         run: |
