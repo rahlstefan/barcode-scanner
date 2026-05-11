@@ -72,19 +72,20 @@ jobs:
       - name: Flutter pub get
         run: flutter pub get
 
-      - name: Generate ios/Flutter/Generated.xcconfig + Podfile
-        # `pod install` requires Generated.xcconfig AND ios/Podfile. Both are
-        # produced by `flutter build ios --config-only` (NOT by `flutter create`
-        # or `flutter pub get`).
+      - name: Generate ios/Flutter/Generated.xcconfig
+        # `pod install` requires Generated.xcconfig. It is produced by
+        # `flutter build ios --config-only`.
         run: |
-          flutter build ios --config-only --no-codesign --release || true
-          echo '--- ios/ tree after config-only ---'
-          ls -la ios
-          test -f ios/Podfile || (echo 'ERROR: ios/Podfile still missing'; exit 1)
+          flutter build ios --config-only --no-codesign --release
           test -f ios/Flutter/Generated.xcconfig || (echo 'ERROR: Generated.xcconfig missing'; exit 1)
 
-      - name: Inject TensorFlowLiteSwift into generated Podfile
-        run: python3 ci/patch_podfile.py
+      - name: Install committed Podfile (with TensorFlowLiteSwift)
+        # Flutter 3.24.5 does NOT auto-generate ios/Podfile during
+        # `flutter create` or `--config-only`. Use our pre-authored Podfile.
+        run: |
+          cp ci/Podfile.template ios/Podfile
+          echo '--- ios/Podfile ---'
+          cat ios/Podfile
 
       - name: Pod install
         run: |
