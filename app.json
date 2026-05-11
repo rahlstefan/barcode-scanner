@@ -6,18 +6,15 @@
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "ios": {
-      "supportsTabletMode": false,
+      "supportsTablet": false,
       "bundleIdentifier": "com.barcode.scanner",
-      "requireFullScreen": true,
       "infoPlist": {
-        "NSCameraUsageDescription": "Необходимо для сканирования кодов",
-        "UIRequiredDeviceCapabilities": [
-          "camera"
-        ]
+        "NSCameraUsageDescription": "Необходимо для сканирования кодов"
       }
     },
-    "android": {},
-    "web": {},
+    "android": {
+      "package": "com.barcode.scanner"
+    },
     "plugins": [
       "expo-camera"
     ],
