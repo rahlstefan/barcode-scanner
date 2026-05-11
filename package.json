@@ -14,23 +14,15 @@
   },
   "dependencies": {
     "expo": "^55.0.23",
-    "react": "^19.2.6",
-    "react-native": "^0.85.3",
     "expo-camera": "^55.0.18",
     "expo-modules-autolinking": "^55.0.21",
-    "expo-skia": "^0.1.0",
-    "expo-modules-core": "^1.11.0"
+    "expo-modules-core": "^1.11.0",
+    "react": "^19.2.6",
+    "react-native": "^0.85.3"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
     "@types/react-native": "^0.73.0",
     "typescript": "^5.0.0"
-  },
-  "dependencies": {
-    "expo": "^55.0.23",
-    "expo-camera": "^55.0.18",
-    "expo-modules-autolinking": "^55.0.21",
-    "react": "^19.2.6",
-    "react-native": "^0.85.3"
   }
 }
