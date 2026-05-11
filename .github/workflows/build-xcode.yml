@@ -1,0 +1,101 @@
+name: Build iOS with Xcode (Alternative)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scheme:
+        description: 'Build scheme'
+        required: true
+        default: 'BarcodeScanner'
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    env:
+      XCODE_VERSION: '15.2'
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔄 Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
+      - name: 📥 Install CocoaPods
+        run: |
+          gem install cocoapods
+          pod setup
+
+      - name: 🏗️ Prebuild iOS
+        run: npm run prebuild -- --clean
+
+      - name: 📦 Install iOS dependencies
+        run: |
+          cd ios
+          pod install --repo-update
+          cd ..
+
+      - name: 🔨 Build iOS app
+        run: |
+          cd ios
+          xcodebuild \
+            -workspace BarcodeScanner.xcworkspace \
+            -scheme BarcodeScanner \
+            -configuration Release \
+            -derivedDataPath build \
+            -allowProvisioningUpdates \
+            clean build
+          cd ..
+
+      - name: 📦 Create IPA
+        run: |
+          cd ios
+          xcodebuild \
+            -workspace BarcodeScanner.xcworkspace \
+            -scheme BarcodeScanner \
+            -configuration Release \
+            -derivedDataPath build \
+            -archivePath build/BarcodeScanner.xcarchive \
+            archive
+          
+          xcodebuild \
+            -exportArchive \
+            -archivePath build/BarcodeScanner.xcarchive \
+            -exportPath build/ipa \
+            -exportOptionsPlist ../scripts/export-options.plist
+          cd ..
+
+      - name: 📤 Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BarcodeScanner.ipa
+          path: ios/build/ipa/*.ipa
+          retention-days: 30
+
+      - name: 📊 Show build size
+        run: |
+          echo "=== Build Artifacts ==="
+          ls -lh ios/build/ipa/
+          du -sh ios/build/ipa/*
+
+      - name: ✅ Build successful
+        if: success()
+        run: echo "🎉 iOS build completed successfully!"
+
+      - name: ❌ Build failed
+        if: failure()
+        run: echo "❌ Build failed. Check logs above."

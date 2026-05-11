@@ -1,0 +1,29 @@
+node_modules/
+.expo/
+dist/
+npm-debug.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+lib/
+.DS_Store
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+.xcode.env
+.xcode.env.local
+
+# iOS build artifacts
+ios/Pods/
+ios/Podfile.lock
+ios/build/
+
+# Generated files
+ios/GeneratedPluginRegistrant.m
+ios/GeneratedPluginRegistrant.swift

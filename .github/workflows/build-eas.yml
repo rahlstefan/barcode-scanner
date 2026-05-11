@@ -1,0 +1,97 @@
+name: Build iOS with EAS
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type (simulator or device)'
+        required: true
+        default: 'simulator'
+        type: choice
+        options:
+          - simulator
+          - device
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      EAS_BUILD_PROFILE: 'ios'
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        run: npm ci
+
+      - name: 🔐 Setup EAS
+        run: npm install -g eas-cli
+
+      - name: 📝 Prepare environment
+        run: |
+          echo "Build started at $(date)"
+          echo "Node version: $(node --version)"
+          echo "npm version: $(npm --version)"
+          eas --version
+
+      - name: 🏗️ Build iOS (Simulator)
+        if: github.event.inputs.build_type == 'simulator' || !github.event.inputs.build_type
+        run: |
+          eas build \
+            --platform ios \
+            --profile preview \
+            --non-interactive \
+            --wait
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: 🏗️ Build iOS (Device)
+        if: github.event.inputs.build_type == 'device'
+        run: |
+          eas build \
+            --platform ios \
+            --profile production \
+            --non-interactive \
+            --wait
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: 📱 Download build artifact
+        if: success()
+        run: |
+          echo "Build artifact ready for download"
+          echo "Check EAS Build dashboard: https://expo.dev/builds"
+
+      - name: 📤 Upload to artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eas-build-logs
+          path: |
+            ~/.eas/logs/**
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 🔔 Notify on success
+        if: success()
+        run: echo "✅ Build completed successfully! Check EAS dashboard for .ipa"
+
+      - name: ❌ Notify on failure
+        if: failure()
+        run: echo "❌ Build failed! Check logs above."

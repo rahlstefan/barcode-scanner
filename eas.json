@@ -1,0 +1,12 @@
+{
+  "ios": {
+    "deploymentTarget": "14.0",
+    "useFrameworks": "static",
+    "podfileProperties": {
+      "ios_deployment_target": "14.0"
+    }
+  },
+  "android": {
+    "minSdkVersion": 24
+  }
+}
