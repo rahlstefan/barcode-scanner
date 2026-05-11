@@ -24,8 +24,7 @@
           "enableCodeScanner": false,
           "enableLocation": false
         }
-      ],
-      "react-native-worklets-core"
+      ]
     ],
     "extra": {
       "eas": {
