@@ -60,28 +60,19 @@ jobs:
       - name: Inject TensorFlowLiteSwift into generated Podfile
         run: |
           PODFILE=ios/Podfile
-          # Set platform to 13.0 (default may be 12.0).
-          if grep -q "^# platform :ios" "$PODFILE"; then
-            sed -i '' "s/^# platform :ios.*/platform :ios, '13.0'/" "$PODFILE"
-          elif grep -q "^platform :ios" "$PODFILE"; then
-            sed -i '' "s/^platform :ios.*/platform :ios, '13.0'/" "$PODFILE"
-          else
-            printf "platform :ios, '13.0'\n%s\n" "$(cat $PODFILE)" > "$PODFILE"
-          fi
-          # Add TFLite pod inside the Runner target.
-          if ! grep -q "TensorFlowLiteSwift" "$PODFILE"; then
-            python3 - "$PODFILE" <<'PY'
-import sys, re
-p = sys.argv[1]
-src = open(p).read()
-pod_line = "  pod 'TensorFlowLiteSwift', '~> 2.14.0'\n"
-# Insert right after `target 'Runner' do`.
-new = re.sub(r"(target 'Runner' do\s*\n)", r"\1" + pod_line, src, count=1)
-open(p, 'w').write(new)
-PY
-          fi
+          python3 -c "
+          import sys, re, io
+          p = 'ios/Podfile'
+          s = open(p).read()
+          s = re.sub(r'^# *platform :ios.*', \"platform :ios, '13.0'\", s, count=1, flags=re.M)
+          if 'platform :ios' not in s:
+              s = \"platform :ios, '13.0'\n\" + s
+          if 'TensorFlowLiteSwift' not in s:
+              s = re.sub(r\"(target 'Runner' do\s*\n)\", r\"\1  pod 'TensorFlowLiteSwift', '~> 2.14.0'\n\", s, count=1)
+          open(p, 'w').write(s)
+          "
           echo '--- Podfile after patch ---'
-          cat "$PODFILE"
+          cat ios/Podfile
 
       - name: Patch Info.plist (camera permission + portrait only)
         run: |
