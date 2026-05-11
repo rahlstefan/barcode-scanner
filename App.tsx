@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   View,
   StyleSheet,
@@ -17,6 +17,7 @@ import {
 import { useTensorflowModel } from 'react-native-fast-tflite';
 import { useResizePlugin } from 'vision-camera-resize-plugin';
 import { Worklets } from 'react-native-worklets-core';
+import { Asset } from 'expo-asset';
 import { TemporalDetectionBuffer } from './src/utils/TemporalDetectionBuffer';
 import { Detection, SmoothedDetection } from './src/types';
 
@@ -37,7 +38,32 @@ type RawDet = {
 export default function App() {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
-  const model = useTensorflowModel(require('./assets/models/yolo.tflite'));
+
+  // Резолвим .tflite через expo-asset, чтобы получить надёжный file:// URI
+  // (require(..) у fast-tflite v3 на iOS Release падает в Nitro AssetLoader).
+  const [modelUri, setModelUri] = useState<string | null>(null);
+  const [assetError, setAssetError] = useState<string | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const asset = Asset.fromModule(require('./assets/models/yolo.tflite'));
+        if (!asset.localUri) {
+          await asset.downloadAsync();
+        }
+        const uri = asset.localUri ?? asset.uri;
+        if (!uri) throw new Error('Не удалось получить URI модели');
+        setModelUri(uri);
+      } catch (e: any) {
+        setAssetError(String(e?.message ?? e));
+      }
+    })();
+  }, []);
+
+  const modelSource = useMemo(
+    () => (modelUri ? { url: modelUri } : { url: '' }),
+    [modelUri]
+  );
+  const model = useTensorflowModel(modelSource);
   const { resize } = useResizePlugin();
 
   const [detections, setDetections] = useState<SmoothedDetection[]>([]);
@@ -214,7 +240,18 @@ export default function App() {
     );
   }
 
-  if (model.state === 'loading') {
+  if (assetError) {
+    return (
+      <View style={styles.center}>
+        <Text style={[styles.statusText, { color: '#f44' }]}>
+          Ошибка ассета модели:
+        </Text>
+        <Text style={styles.errorText}>{assetError}</Text>
+      </View>
+    );
+  }
+
+  if (modelUri == null || model.state === 'loading') {
     return (
       <View style={styles.center}>
         <ActivityIndicator color="#0f0" size="large" />
