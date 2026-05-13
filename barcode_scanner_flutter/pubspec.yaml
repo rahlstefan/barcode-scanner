@@ -18,4 +18,4 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
-    - assets/models/best_float16.tflite
+    - assets/models/yolo26n_320_multiclass_no_mosaic_tail_20260512_073544_float16.tflite

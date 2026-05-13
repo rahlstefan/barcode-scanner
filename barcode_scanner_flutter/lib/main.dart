@@ -85,7 +85,7 @@ class _ScannerPageState extends State<ScannerPage> {
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
-                'DMTX • ${_smoothed.length}',
+                '${kModelDisplayName.split('_').first.toUpperCase()} • ${_smoothed.length}',
                 style: const TextStyle(
                     color: Colors.white,
                     fontSize: 14,

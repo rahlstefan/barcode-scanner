@@ -31,6 +31,9 @@ class BBoxPainter extends CustomPainter {
       ..color = const Color(0x2200E5FF);
 
     for (final d in detections) {
+      final accent = _classColor(d.classId);
+      stroke.color = accent;
+      fill.color = accent.withOpacity(0.18);
       final r = Rect.fromLTRB(
         dx + d.x1 * frameSize.width * s,
         dy + d.y1 * frameSize.height * s,
@@ -44,7 +47,8 @@ class BBoxPainter extends CustomPainter {
 
       final tp = TextPainter(
         text: TextSpan(
-          text: '${(d.score * 100).toStringAsFixed(0)}%',
+          text:
+              '${detectionClassLabel(d.classId)} ${(d.score * 100).toStringAsFixed(0)}%',
           style: const TextStyle(
               color: Colors.white,
               fontSize: 12,
@@ -60,4 +64,17 @@ class BBoxPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant BBoxPainter old) =>
       old.detections != detections || old.frameSize != frameSize;
+
+  Color _classColor(int classId) {
+    switch (classId) {
+      case 0:
+        return const Color(0xFF00E5FF);
+      case 1:
+        return const Color(0xFFFFB300);
+      case 2:
+        return const Color(0xFF7CFF6B);
+      default:
+        return const Color(0xFFFFFFFF);
+    }
+  }
 }

@@ -5,12 +5,12 @@ import TensorFlowLite
 import Accelerate
 
 // =====================================================================
-//  DMTX Scanner — native iOS layer
+//  Barcode Scanner — native iOS layer
 //  - AVFoundation capture (AVCaptureSession + AVCaptureVideoDataOutput)
-//  - TensorFlowLiteSwift FULL int8 inference
-//      model: best_full_integer_quant.tflite
-//      input  : int8  [1,320,320,3]  scale=1/255 zp=-128
-//      output : int8  [1,300,6]      scale~0.00412 zp=-124   NMS embedded
+//  - TensorFlowLiteSwift float inference
+//      model: yolo26n_320_multiclass_no_mosaic_tail_20260512_073544_float16.tflite
+//      input  : float32 [1,320,320,3] normalized 0..1
+//      output : float32 [1,300,6]      embedded postprocess
 //                                    layout: x1, y1, x2, y2, score, cls
 //                                    coords normalized to 0..1
 //
@@ -18,20 +18,22 @@ import Accelerate
 // =====================================================================
 
 // ---------------------------------------------------------------------
-// MARK: - Global logger (NSLog + Flutter EventChannel + ring buffer)
+// MARK: - Global logger (NSLog + Flutter EventChannel + session history)
 // ---------------------------------------------------------------------
 
 final class DLog {
   static let shared = DLog()
+  private static let iso = ISO8601DateFormatter()
   private let lock = NSLock()
-  private var ring: [String] = []
-  private let ringMax = 400
+  private var lines: [String] = []
+  private var entries: [[String: Any]] = []
+  private var nextId: Int = 1
   private var sink: FlutterEventSink?
 
   func attach(sink: @escaping FlutterEventSink) {
     lock.lock()
     self.sink = sink
-    let snapshot = ring
+    let snapshot = lines
     lock.unlock()
     DispatchQueue.main.async {
       for line in snapshot { sink(line) }
@@ -43,14 +45,54 @@ final class DLog {
     sink = nil
   }
 
-  func log(_ msg: String) {
-    let ts = String(format: "%.3f", CACurrentMediaTime())
+  func clear() {
+    lock.lock(); defer { lock.unlock() }
+    lines.removeAll(keepingCapacity: false)
+    entries.removeAll(keepingCapacity: false)
+    nextId = 1
+  }
+
+  func exportJSON() -> String {
+    lock.lock()
+    let snapshot = entries
+    lock.unlock()
+    guard JSONSerialization.isValidJSONObject(snapshot),
+          let data = try? JSONSerialization.data(withJSONObject: snapshot,
+                                                 options: [.prettyPrinted, .sortedKeys]),
+          let text = String(data: data, encoding: .utf8) else {
+      return "[]"
+    }
+    return text
+  }
+
+  func saveJSONFile() throws -> String {
+    let json = exportJSON()
+    let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+      ?? URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+    let stamp = DLog.iso.string(from: Date()).replacingOccurrences(of: ":", with: "-")
+    let url = dir.appendingPathComponent("bboxfix_logs_\(stamp).json")
+    try json.data(using: .utf8)?.write(to: url, options: .atomic)
+    return url.path
+  }
+
+  func log(_ msg: String, fields: [String: Any] = [:]) {
+    let uptime = CACurrentMediaTime()
+    let ts = String(format: "%.3f", uptime)
     let line = "[\(ts)] \(msg)"
     NSLog("[DMTX] %@", line)
     var sinkRef: FlutterEventSink?
     lock.lock()
-    ring.append(line)
-    if ring.count > ringMax { ring.removeFirst(ring.count - ringMax) }
+    var entry: [String: Any] = [
+      "id": nextId,
+      "uptimeSec": uptime,
+      "wallTime": DLog.iso.string(from: Date()),
+      "message": msg,
+      "line": line,
+    ]
+    for (k, v) in fields { entry[k] = v }
+    nextId += 1
+    lines.append(line)
+    entries.append(entry)
     sinkRef = sink
     lock.unlock()
     if let s = sinkRef {
@@ -74,6 +116,11 @@ final class DLog {
   private var lastDetectorError: String?
   private var confidenceThreshold: Float = 0.25
   private weak var lastCameraView: CameraPreviewView?
+  private var perfLatenciesMs: [Double] = []
+  private var perfFrames: Int = 0
+  private var perfDetections: Int = 0
+  private var perfClassHits: [Int: Int] = [:]
+  private var lastPerfLogTime: CFTimeInterval = CACurrentMediaTime()
 
   override func application(
     _ application: UIApplication,
@@ -117,6 +164,21 @@ final class DLog {
           dlog("manual self-test -> \(msg)")
           result(msg)
         }
+      case "getLogsJson":
+        result(DLog.shared.exportJSON())
+      case "saveLogsJson":
+        do {
+          let path = try DLog.shared.saveJSONFile()
+          dlog("logs json saved -> \(path)")
+          result(path)
+        } catch {
+          result(FlutterError(code: "save_logs_json",
+                              message: "\(error)", details: nil))
+        }
+      case "clearLogs":
+        DLog.shared.clear()
+        dlog("logs cleared")
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -125,7 +187,16 @@ final class DLog {
     // 4. Load TFLite model (after logs are wired).
     do {
       detector = try YoloDetector()
-      dlog("YOLO full-int8 model loaded OK")
+      dlog("YOLO model loaded OK")
+      DLog.shared.log(detector?.startupSummary() ?? "model summary unavailable", fields: [
+        "kind": "model_metrics",
+        "model": YoloDetector.modelDisplayName,
+        "precision": YoloDetector.valPrecision,
+        "recall": YoloDetector.valRecall,
+        "map50": YoloDetector.valMap50,
+        "map50_95": YoloDetector.valMap50_95,
+        "classes": YoloDetector.classNames,
+      ])
       // Run startup self-test on a synthetic pattern (proves inference works).
       DispatchQueue.global(qos: .utility).async { [weak self] in
         if let s = self?.detector?.runSelfTest() { dlog("SELF-TEST: \(s)") }
@@ -155,14 +226,55 @@ final class DLog {
     let dets = det.run(pixelBuffer: pixelBuffer, frameId: frameId,
                        threshold: confidenceThreshold)
     let dt = (CACurrentMediaTime() - t0) * 1000.0
+    perfFrames += 1
+    perfDetections += dets.count
+    perfLatenciesMs.append(dt)
+    if perfLatenciesMs.count > 180 {
+      perfLatenciesMs.removeFirst(perfLatenciesMs.count - 180)
+    }
+    for detMap in dets {
+      let cls = (detMap["cls"] as? Int) ?? 0
+      perfClassHits[cls, default: 0] += 1
+    }
     if frameId % 30 == 0 {
-      dlog(String(format: "frame=%d dets=%d thr=%.2f infer=%.1fms sink=%@",
-                  frameId, dets.count, Double(confidenceThreshold), dt,
-                  detectionsSink == nil ? "NIL" : "OK"))
+      let now = CACurrentMediaTime()
+      let elapsed = max(now - lastPerfLogTime, 0.001)
+      let fps = Double(perfFrames) / elapsed
+      let avg = perfLatenciesMs.reduce(0, +) / Double(max(perfLatenciesMs.count, 1))
+      let sorted = perfLatenciesMs.sorted()
+      let p95Index = min(sorted.count - 1, Int(Double(max(sorted.count - 1, 0)) * 0.95))
+      let p95 = sorted.isEmpty ? dt : sorted[p95Index]
+      let detsPerFrame = Double(perfDetections) / Double(max(perfFrames, 1))
+      let clsSummary = perfClassHits.keys.sorted().map {
+        "\(YoloDetector.className(for: $0))=\(perfClassHits[$0] ?? 0)"
+      }.joined(separator: ",")
+      DLog.shared.log(
+        String(format: "frame=%d dets=%d thr=%.2f infer=%.1fms sink=%@ fps=%.1f avg=%.1f p95=%.1f det/frame=%.2f cls={%@}",
+               frameId, dets.count, Double(confidenceThreshold), dt,
+               detectionsSink == nil ? "NIL" : "OK", fps, avg, p95,
+               detsPerFrame, clsSummary),
+        fields: [
+          "kind": "runtime_perf",
+          "frameId": frameId,
+          "detections": dets.count,
+          "threshold": confidenceThreshold,
+          "inferMs": dt,
+          "fps": fps,
+          "inferAvgMs": avg,
+          "inferP95Ms": p95,
+          "detectionsPerFrame": detsPerFrame,
+          "classHits": perfClassHits,
+        ])
+      lastPerfLogTime = now
+      perfFrames = 0
+      perfDetections = 0
+      perfClassHits.removeAll()
     } else if !dets.isEmpty {
+      let topCls = YoloDetector.className(for: (dets.first?["cls"] as? Int) ?? 0)
       dlog(String(format: "frame=%d dets=%d top=%.2f infer=%.1fms",
                   frameId, dets.count,
-                  Double((dets.first?["score"] as? Float) ?? 0), dt))
+                  Double((dets.first?["score"] as? Float) ?? 0), dt) +
+           " cls=\(topCls)")
     }
     if let sink = detectionsSink {
       DispatchQueue.main.async { sink(dets) }
@@ -314,7 +426,7 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 }
 
 // ---------------------------------------------------------------------
-// MARK: - YOLO float32 detector (best_float16.tflite)
+// MARK: - YOLO float32 detector (new multiclass float16 asset)
 //   - TFLiteSwift 2.14 lacks an `int8` case in Tensor.DataType, so we
 //     ship the float16 model whose I/O is float32 (weights are fp16).
 //   - input  : float32 [1,320,320,3]   pixel/255
@@ -325,6 +437,20 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 enum YoloError: Error { case modelNotFound, allocFailed, badTensor }
 
 final class YoloDetector {
+  static let modelDisplayName = "yolo26n_320_multiclass_no_mosaic_tail_20260512_073544"
+  static let modelAssetName =
+    "yolo26n_320_multiclass_no_mosaic_tail_20260512_073544_float16.tflite"
+  static let classNames = ["datamatrix", "code128", "pdf417"]
+  static let valPrecision: Float = 0.95583
+  static let valRecall: Float = 0.95400
+  static let valMap50: Float = 0.97400
+  static let valMap50_95: Float = 0.82577
+
+  static func className(for id: Int) -> String {
+    guard id >= 0 && id < classNames.count else { return "cls\(id)" }
+    return classNames[id]
+  }
+
   private let interpreter: Interpreter
   private let inputW = 320
   private let inputH = 320
@@ -343,8 +469,7 @@ final class YoloDetector {
     // pubspec asset path -> bundle resource key, then resolve via
     // Bundle.main.path(forResource:ofType:).
     let assetCandidates = [
-      "assets/models/best_float16.tflite",
-      "assets/models/best_float32.tflite",
+      "assets/models/\(Self.modelAssetName)",
     ]
     var resolved: String? = nil
     for asset in assetCandidates {
@@ -365,7 +490,7 @@ final class YoloDetector {
         .appendingPathComponent("Frameworks")
       if let frameworks = try? fm.contentsOfDirectory(atPath: frameworksDir) {
         outer: for fw in frameworks where fw.hasSuffix(".framework") {
-          for name in ["best_float16.tflite", "best_float32.tflite"] {
+          for name in [Self.modelAssetName] {
             let candidate = (frameworksDir as NSString)
               .appendingPathComponent(fw)
               .appending("/flutter_assets/assets/models/\(name)")
@@ -439,6 +564,15 @@ final class YoloDetector {
     dlog("input  shape=\(inT.shape.dimensions) dtype=\(inT.dataType)")
     dlog("output shape=\(oshape) dtype=\(outT.dataType)")
     dlog("rows=\(outRows) cols=\(outCols)")
+  }
+
+  func startupSummary() -> String {
+    let classes = Self.classNames.joined(separator: ",")
+    return String(
+      format: "model=%@ classes=[%@] valP=%.3f valR=%.3f mAP50=%.3f mAP50-95=%.3f",
+      Self.modelDisplayName, classes,
+      Double(Self.valPrecision), Double(Self.valRecall),
+      Double(Self.valMap50), Double(Self.valMap50_95))
   }
 
   func run(pixelBuffer: CVPixelBuffer, frameId: Int, threshold: Float) -> [[String: Any]] {
@@ -569,12 +703,13 @@ final class YoloDetector {
       var x2 = floats[base + 2]
       var y2 = floats[base + 3]
       let cls = Int(floats[base + 5].rounded())
+      let label = Self.className(for: cls)
       x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
       x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
       if x2 <= x1 || y2 <= y1 { continue }
       out.append([
         "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-        "score": conf, "cls": cls, "fid": frameId,
+        "score": conf, "cls": cls, "label": label, "fid": frameId,
       ])
       if out.count >= 50 { break }
     }

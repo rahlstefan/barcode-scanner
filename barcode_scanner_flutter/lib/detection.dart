@@ -1,5 +1,17 @@
 import 'package:flutter/foundation.dart';
 
+const String kModelDisplayName =
+    'yolo26n_320_multiclass_no_mosaic_tail_20260512_073544';
+
+const Map<int, String> kDetectionClassNames = {
+  0: 'datamatrix',
+  1: 'code128',
+  2: 'pdf417',
+};
+
+String detectionClassLabel(int classId) =>
+    kDetectionClassNames[classId] ?? 'cls$classId';
+
 /// Single detection in NORMALIZED model-space coordinates (0..1).
 /// `cx,cy,w,h` are center+size in the same normalized space.
 @immutable

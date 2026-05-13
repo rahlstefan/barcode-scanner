@@ -58,6 +58,20 @@ class DetectionStream {
     final r = await _control.invokeMethod<String>('selfTest');
     return r ?? '<null>';
   }
+
+  static Future<String> getLogsJson() async {
+    final r = await _control.invokeMethod<String>('getLogsJson');
+    return r ?? '[]';
+  }
+
+  static Future<String> saveLogsJson() async {
+    final r = await _control.invokeMethod<String>('saveLogsJson');
+    return r ?? '<null>';
+  }
+
+  static Future<void> clearNativeLogs() async {
+    await _control.invokeMethod('clearLogs');
+  }
 }
 
 /// Native log line stream (mirrors NSLog into the app via EventChannel

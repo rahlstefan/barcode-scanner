@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'native_camera.dart';
@@ -10,8 +11,7 @@ import 'native_camera.dart';
 /// `com.bboxfix/logs` EventChannel). A "TEST" button runs the native
 /// inference self-test and appends the result to the log.
 class DebugLogOverlay extends StatefulWidget {
-  const DebugLogOverlay({super.key, this.maxLines = 200});
-  final int maxLines;
+  const DebugLogOverlay({super.key});
 
   @override
   State<DebugLogOverlay> createState() => _DebugLogOverlayState();
@@ -33,9 +33,6 @@ class _DebugLogOverlayState extends State<DebugLogOverlay> {
       if (!mounted) return;
       setState(() {
         _lines.add(line);
-        if (_lines.length > widget.maxLines) {
-          _lines.removeRange(0, _lines.length - widget.maxLines);
-        }
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scroll.hasClients) {
@@ -56,9 +53,6 @@ class _DebugLogOverlayState extends State<DebugLogOverlay> {
   void _append(String s) {
     setState(() {
       _lines.add(s);
-      if (_lines.length > widget.maxLines) {
-        _lines.removeRange(0, _lines.length - widget.maxLines);
-      }
     });
   }
 
@@ -83,6 +77,40 @@ class _DebugLogOverlayState extends State<DebugLogOverlay> {
   Future<void> _copyLogs() async {
     await Clipboard.setData(ClipboardData(text: _lines.join('\n')));
     _append('--- copied ${_lines.length} lines to clipboard ---');
+  }
+
+  Future<void> _copyLogsJson() async {
+    try {
+      final raw = await DetectionStream.getLogsJson();
+      final pretty = const JsonEncoder.withIndent('  ')
+          .convert(jsonDecode(raw));
+      await Clipboard.setData(ClipboardData(text: pretty));
+      _append('--- copied session logs as JSON to clipboard ---');
+    } on PlatformException catch (e) {
+      _append('JSON COPY ERROR: $e');
+    } catch (e) {
+      _append('JSON COPY ERROR: $e');
+    }
+  }
+
+  Future<void> _saveLogsJson() async {
+    try {
+      final path = await DetectionStream.saveLogsJson();
+      _append('--- logs saved to JSON: $path ---');
+    } on PlatformException catch (e) {
+      _append('JSON SAVE ERROR: $e');
+    }
+  }
+
+  Future<void> _clearLogs() async {
+    setState(() => _lines.clear());
+    try {
+      await DetectionStream.clearNativeLogs();
+    } on PlatformException catch (e) {
+      _append('CLEAR ERROR: $e');
+      return;
+    }
+    _append('--- logs cleared ---');
   }
 
   @override
@@ -130,7 +158,11 @@ class _DebugLogOverlayState extends State<DebugLogOverlay> {
                       const SizedBox(width: 6),
                       _miniBtn('COPY', _copyLogs),
                       const SizedBox(width: 6),
-                      _miniBtn('CLR', () => setState(_lines.clear)),
+                      _miniBtn('JSON', _copyLogsJson),
+                      const SizedBox(width: 6),
+                      _miniBtn('SAVE', _saveLogsJson),
+                      const SizedBox(width: 6),
+                      _miniBtn('CLR', _clearLogs),
                     ],
                   ),
                 ],
