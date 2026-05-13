@@ -563,13 +563,20 @@ final class YoloDetector {
   private let inputW = 320
   private let inputH = 320
 
+  private enum OutputLayout {
+    case end2end(rows: Int, cols: Int)
+    case oneToMany(channels: Int, anchors: Int)
+    case unknown
+  }
+
   // Reusable buffers.
   private var resizeBuf: [UInt8]              // 320x320 BGRA
   private var inputBuf: [Float32]             // 320x320x3 packed RGB float
 
   // Output shape.
-  private let outRows: Int    // 300
-  private let outCols: Int    // 6
+  private let outRows: Int
+  private let outCols: Int
+  private let outputLayout: OutputLayout
 
   init(spec: ModelSpec) throws {
     self.spec = spec
@@ -667,12 +674,27 @@ final class YoloDetector {
 
     let oshape = outT.shape.dimensions
     if oshape.count == 3 {
-      self.outRows = oshape[1]
-      self.outCols = oshape[2]
+      let d1 = oshape[1]
+      let d2 = oshape[2]
+      if d2 >= 6 {
+        self.outRows = d1
+        self.outCols = d2
+        self.outputLayout = .end2end(rows: d1, cols: d2)
+      } else if d1 >= 5 && d2 > 10 {
+        self.outRows = d2
+        self.outCols = d1
+        self.outputLayout = .oneToMany(channels: d1, anchors: d2)
+      } else {
+        dlog("UNEXPECTED output shape: \(oshape)")
+        self.outRows = 300
+        self.outCols = 6
+        self.outputLayout = .unknown
+      }
     } else {
-      dlog("UNEXPECTED output shape: \(oshape)")
+      dlog("UNEXPECTED output rank/shape: \(oshape)")
       self.outRows = 300
       self.outCols = 6
+      self.outputLayout = .unknown
     }
 
     self.resizeBuf = [UInt8](repeating: 0, count: inputW * inputH * 4)
@@ -682,6 +704,14 @@ final class YoloDetector {
     dlog("input  shape=\(inT.shape.dimensions) dtype=\(inT.dataType)")
     dlog("output shape=\(oshape) dtype=\(outT.dataType)")
     dlog("rows=\(outRows) cols=\(outCols)")
+    switch outputLayout {
+    case .end2end(let rows, let cols):
+      dlog("output layout=end2end rows=\(rows) cols=\(cols)")
+    case .oneToMany(let channels, let anchors):
+      dlog("output layout=oneToMany channels=\(channels) anchors=\(anchors)")
+    case .unknown:
+      dlog("output layout=unknown")
+    }
   }
 
   func startupSummary() -> String {
@@ -793,6 +823,54 @@ final class YoloDetector {
   // -----------------------------------------------------------------
   // MARK: Decode
   // -----------------------------------------------------------------
+  private func iou(_ a: (Float, Float, Float, Float), _ b: (Float, Float, Float, Float)) -> Float {
+    let ix1 = max(a.0, b.0)
+    let iy1 = max(a.1, b.1)
+    let ix2 = min(a.2, b.2)
+    let iy2 = min(a.3, b.3)
+    let iw = max(ix2 - ix1, 0)
+    let ih = max(iy2 - iy1, 0)
+    let inter = iw * ih
+    let areaA = max(a.2 - a.0, 0) * max(a.3 - a.1, 0)
+    let areaB = max(b.2 - b.0, 0) * max(b.3 - b.1, 0)
+    let union = areaA + areaB - inter
+    return union > 0 ? inter / union : 0
+  }
+
+  private func nmsByClass(
+    _ boxes: [(x1: Float, y1: Float, x2: Float, y2: Float, conf: Float, cls: Int)],
+    iouThreshold: Float,
+    maxKeep: Int
+  ) -> [(x1: Float, y1: Float, x2: Float, y2: Float, conf: Float, cls: Int)] {
+    var grouped: [Int: [(x1: Float, y1: Float, x2: Float, y2: Float, conf: Float, cls: Int)]] = [:]
+    for b in boxes {
+      grouped[b.cls, default: []].append(b)
+    }
+    var kept: [(x1: Float, y1: Float, x2: Float, y2: Float, conf: Float, cls: Int)] = []
+    for (_, clsBoxes) in grouped {
+      let sorted = clsBoxes.sorted { $0.conf > $1.conf }
+      var localKeep: [(x1: Float, y1: Float, x2: Float, y2: Float, conf: Float, cls: Int)] = []
+      for cand in sorted {
+        var suppressed = false
+        for k in localKeep {
+          if iou((cand.x1, cand.y1, cand.x2, cand.y2), (k.x1, k.y1, k.x2, k.y2)) > iouThreshold {
+            suppressed = true
+            break
+          }
+        }
+        if !suppressed {
+          localKeep.append(cand)
+        }
+      }
+      kept.append(contentsOf: localKeep)
+    }
+    kept.sort { $0.conf > $1.conf }
+    if kept.count > maxKeep {
+      return Array(kept.prefix(maxKeep))
+    }
+    return kept
+  }
+
   private func decode(frameId: Int, threshold: Float, logThis: Bool) -> [[String: Any]] {
     guard let out0 = try? interpreter.output(at: 0) else {
       dlog("decode: output(0) failed")
@@ -820,53 +898,121 @@ final class YoloDetector {
     var normalizedRows = 0
     var droppedGeom = 0
 
-    for i in 0..<n {
-      let base = i * k
-      let conf = floats[base + 4]
-      if conf > 0.001 { nAboveZero += 1 }
-      if conf > topScore { topScore = conf; topIdx = i }
-      if conf < threshold { continue }
-      var x1 = floats[base + 0]
-      var y1 = floats[base + 1]
-      var x2 = floats[base + 2]
-      var y2 = floats[base + 3]
-      let cls = Int(floats[base + 5].rounded())
-      let label = className(for: cls)
+    switch outputLayout {
+    case .end2end:
+      for i in 0..<n {
+        let base = i * k
+        let conf = floats[base + 4]
+        if conf > 0.001 { nAboveZero += 1 }
+        if conf > topScore { topScore = conf; topIdx = i }
+        if conf < threshold { continue }
+        var x1 = floats[base + 0]
+        var y1 = floats[base + 1]
+        var x2 = floats[base + 2]
+        var y2 = floats[base + 3]
+        let cls = Int(floats[base + 5].rounded())
+        let label = className(for: cls)
 
-      // Some exports output coords normalized to 0..1, others output
-      // model-space pixels (0..320). Support both without manual toggles.
-      let coordAbsMax = max(abs(x1), abs(y1), abs(x2), abs(y2))
-      if coordAbsMax > 2.0 {
-        x1 /= Float(inputW)
-        x2 /= Float(inputW)
-        y1 /= Float(inputH)
-        y2 /= Float(inputH)
-        pixelCoordRows += 1
-      } else {
-        normalizedRows += 1
-      }
+        let coordAbsMax = max(abs(x1), abs(y1), abs(x2), abs(y2))
+        if coordAbsMax > 2.0 {
+          x1 /= Float(inputW)
+          x2 /= Float(inputW)
+          y1 /= Float(inputH)
+          y2 /= Float(inputH)
+          pixelCoordRows += 1
+        } else {
+          normalizedRows += 1
+        }
 
-      x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
-      x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
-      if x2 <= x1 || y2 <= y1 {
-        droppedGeom += 1
-        continue
+        x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
+        x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
+        if x2 <= x1 || y2 <= y1 {
+          droppedGeom += 1
+          continue
+        }
+        out.append([
+          "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+          "score": conf, "cls": cls, "label": label, "fid": frameId,
+        ])
+        if out.count >= 50 { break }
       }
-      out.append([
-        "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-        "score": conf, "cls": cls, "label": label, "fid": frameId,
-      ])
-      if out.count >= 50 { break }
+    case .oneToMany(let channels, let anchors):
+      var candidates: [(x1: Float, y1: Float, x2: Float, y2: Float, conf: Float, cls: Int)] = []
+      candidates.reserveCapacity(64)
+      for a in 0..<anchors {
+        let cx = floats[a]
+        let cy = floats[anchors + a]
+        let w = floats[anchors * 2 + a]
+        let h = floats[anchors * 3 + a]
+        var bestCls = 0
+        var bestScore: Float = 0
+        if channels > 4 {
+          for c in 4..<channels {
+            let s = floats[anchors * c + a]
+            if s > bestScore {
+              bestScore = s
+              bestCls = c - 4
+            }
+          }
+        }
+        if bestScore > 0.001 { nAboveZero += 1 }
+        if bestScore > topScore {
+          topScore = bestScore
+          topIdx = a
+        }
+        if bestScore < threshold { continue }
+
+        var x1 = cx - w * 0.5
+        var y1 = cy - h * 0.5
+        var x2 = cx + w * 0.5
+        var y2 = cy + h * 0.5
+        let coordAbsMax = max(abs(x1), abs(y1), abs(x2), abs(y2))
+        if coordAbsMax > 2.0 {
+          x1 /= Float(inputW)
+          x2 /= Float(inputW)
+          y1 /= Float(inputH)
+          y2 /= Float(inputH)
+          pixelCoordRows += 1
+        } else {
+          normalizedRows += 1
+        }
+
+        x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
+        x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
+        if x2 <= x1 || y2 <= y1 {
+          droppedGeom += 1
+          continue
+        }
+        candidates.append((x1: x1, y1: y1, x2: x2, y2: y2, conf: bestScore, cls: bestCls))
+      }
+      let kept = nmsByClass(candidates, iouThreshold: 0.45, maxKeep: 50)
+      for kbox in kept {
+        out.append([
+          "x1": kbox.x1, "y1": kbox.y1, "x2": kbox.x2, "y2": kbox.y2,
+          "score": kbox.conf, "cls": kbox.cls,
+          "label": className(for: kbox.cls), "fid": frameId,
+        ])
+      }
+    case .unknown:
+      dlog("decode: unsupported output layout")
+      return []
     }
 
     if logThis {
-      let b = topIdx * k
-      let row: [Float] = (0..<k).map { floats[b + $0] }
       let mode = pixelCoordRows > normalizedRows ? "pixel320" : "norm01"
       dlog(String(format: "decode rows=%d nonZero=%d topScore=%.3f kept=%d droppedGeom=%d mode=%@ (thr=%.2f)",
                   n, nAboveZero, Double(topScore), out.count, droppedGeom, mode,
                   Double(threshold)))
-      dlog("decode topRow#\(topIdx)=\(row.map { String(format: "%.3f", $0) })")
+      switch outputLayout {
+      case .end2end:
+        let b = topIdx * k
+        let row: [Float] = (0..<k).map { floats[b + $0] }
+        dlog("decode topRow#\(topIdx)=\(row.map { String(format: "%.3f", $0) })")
+      case .oneToMany:
+        dlog("decode topAnchor#\(topIdx) conf=\(String(format: "%.3f", Double(topScore)))")
+      case .unknown:
+        break
+      }
     }
     return out
   }
@@ -903,18 +1049,40 @@ final class YoloDetector {
         let p = raw.bindMemory(to: Float32.self)
         return Array(UnsafeBufferPointer(start: p.baseAddress, count: min(p.count, total)))
       }
-      var topScore: Float = 0
-      var topRow: [Float] = []
-      for i in 0..<outRows {
-        let b = i * outCols
-        let conf = floats[b + 4]
-        if conf > topScore {
-          topScore = conf
-          topRow = (0..<outCols).map { floats[b + $0] }
+      switch outputLayout {
+      case .end2end(let rows, let cols):
+        var topScore: Float = 0
+        var topRow: [Float] = []
+        for i in 0..<rows {
+          let b = i * cols
+          let conf = floats[b + 4]
+          if conf > topScore {
+            topScore = conf
+            topRow = (0..<cols).map { floats[b + $0] }
+          }
         }
+        let rs = topRow.map { String(format: "%.3f", $0) }
+        return "synthDM[end2end] topScore=\(String(format: "%.3f", topScore)) topRow=\(rs)"
+      case .oneToMany(let channels, let anchors):
+        var topScore: Float = 0
+        var topAnchor: Int = 0
+        if channels > 4 {
+          for a in 0..<anchors {
+            var best: Float = 0
+            for c in 4..<channels {
+              let s = floats[anchors * c + a]
+              if s > best { best = s }
+            }
+            if best > topScore {
+              topScore = best
+              topAnchor = a
+            }
+          }
+        }
+        return "synthDM[oneToMany] topScore=\(String(format: "%.3f", topScore)) topAnchor=\(topAnchor)"
+      case .unknown:
+        return "self-test: unknown output layout"
       }
-      let rs = topRow.map { String(format: "%.3f", $0) }
-      return "synthDM topScore=\(String(format: "%.3f", topScore)) topRow=\(rs)"
     } catch {
       return "self-test error: \(error)"
     }
