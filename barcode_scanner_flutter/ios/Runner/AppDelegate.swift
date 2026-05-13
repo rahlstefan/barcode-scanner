@@ -113,7 +113,9 @@ final class DLog {
 @objc class AppDelegate: FlutterAppDelegate {
   private var detectionsSink: FlutterEventSink?
   private var detector: YoloDetector?
+  private let detectorLock = NSLock()
   private var lastDetectorError: String?
+  private var currentModelId: String = "multiclass_tail"
   private var confidenceThreshold: Float = 0.25
   private weak var lastCameraView: CameraPreviewView?
   private var perfLatenciesMs: [Double] = []
@@ -154,8 +156,30 @@ final class DLog {
           dlog(String(format: "confidence threshold set to %.2f", v))
           result(nil)
         } else { result(FlutterError(code: "args", message: "value required", details: nil)) }
+      case "setModel":
+        guard let args = call.arguments as? [String: Any],
+              let modelId = args["id"] as? String
+        else {
+          result(FlutterError(code: "args", message: "id required", details: nil))
+          return
+        }
+        self.loadDetector(modelId: modelId, reason: "manual-switch")
+        if self.detector == nil {
+          result(FlutterError(code: "set_model",
+                              message: self.lastDetectorError ?? "detector nil",
+                              details: nil))
+        } else {
+          result(nil)
+        }
+      case "getModel":
+        result(self.currentModelId)
+      case "listModels":
+        result(YoloDetector.availableModels.map { ["id": $0.id, "name": $0.displayName] })
       case "selfTest":
-        if let det = self.detector {
+        self.detectorLock.lock()
+        let det = self.detector
+        self.detectorLock.unlock()
+        if let det = det {
           let res = det.runSelfTest()
           dlog("manual self-test -> \(res)")
           result(res)
@@ -185,26 +209,7 @@ final class DLog {
     }
 
     // 4. Load TFLite model (after logs are wired).
-    do {
-      detector = try YoloDetector()
-      dlog("YOLO model loaded OK")
-      DLog.shared.log(detector?.startupSummary() ?? "model summary unavailable", fields: [
-        "kind": "model_metrics",
-        "model": YoloDetector.modelDisplayName,
-        "precision": YoloDetector.valPrecision,
-        "recall": YoloDetector.valRecall,
-        "map50": YoloDetector.valMap50,
-        "map50_95": YoloDetector.valMap50_95,
-        "classes": YoloDetector.classNames,
-      ])
-      // Run startup self-test on a synthetic pattern (proves inference works).
-      DispatchQueue.global(qos: .utility).async { [weak self] in
-        if let s = self?.detector?.runSelfTest() { dlog("SELF-TEST: \(s)") }
-      }
-    } catch {
-      lastDetectorError = "\(error)"
-      dlog("FAILED to load model: \(error)")
-    }
+    loadDetector(modelId: currentModelId, reason: "startup")
 
     // 5. PlatformView factory for the camera preview.
     let factory = CameraPreviewFactory(messenger: messenger, owner: self)
@@ -216,7 +221,10 @@ final class DLog {
 
   // Called by the camera view on every frame (videoQueue).
   func handleSampleBuffer(_ pixelBuffer: CVPixelBuffer, frameId: Int) {
-    guard let det = detector else {
+    detectorLock.lock()
+    let det = detector
+    detectorLock.unlock()
+    guard let det = det else {
       if frameId % 60 == 0 {
         dlog("frame=\(frameId) detector is nil; lastError=\(lastDetectorError ?? "<none>")")
       }
@@ -246,7 +254,7 @@ final class DLog {
       let p95 = sorted.isEmpty ? dt : sorted[p95Index]
       let detsPerFrame = Double(perfDetections) / Double(max(perfFrames, 1))
       let clsSummary = perfClassHits.keys.sorted().map {
-        "\(YoloDetector.className(for: $0))=\(perfClassHits[$0] ?? 0)"
+        "\(det.className(for: $0))=\(perfClassHits[$0] ?? 0)"
       }.joined(separator: ",")
       DLog.shared.log(
         String(format: "frame=%d dets=%d thr=%.2f infer=%.1fms sink=%@ fps=%.1f avg=%.1f p95=%.1f det/frame=%.2f cls={%@}",
@@ -270,7 +278,7 @@ final class DLog {
       perfDetections = 0
       perfClassHits.removeAll()
     } else if !dets.isEmpty {
-      let topCls = YoloDetector.className(for: (dets.first?["cls"] as? Int) ?? 0)
+      let topCls = det.className(for: (dets.first?["cls"] as? Int) ?? 0)
       dlog(String(format: "frame=%d dets=%d top=%.2f infer=%.1fms",
                   frameId, dets.count,
                   Double((dets.first?["score"] as? Float) ?? 0), dt) +
@@ -282,6 +290,55 @@ final class DLog {
   }
 
   func setActiveCameraView(_ v: CameraPreviewView) { lastCameraView = v }
+
+  private func resetPerfStats() {
+    perfLatenciesMs.removeAll(keepingCapacity: true)
+    perfFrames = 0
+    perfDetections = 0
+    perfClassHits.removeAll(keepingCapacity: true)
+    lastPerfLogTime = CACurrentMediaTime()
+  }
+
+  private func loadDetector(modelId: String, reason: String) {
+    guard let spec = YoloDetector.spec(for: modelId) else {
+      lastDetectorError = "unknown model id: \(modelId)"
+      dlog("FAILED to switch model: \(lastDetectorError ?? "unknown")")
+      return
+    }
+    do {
+      let newDet = try YoloDetector(spec: spec)
+      detectorLock.lock()
+      detector = newDet
+      detectorLock.unlock()
+      currentModelId = modelId
+      lastDetectorError = nil
+      resetPerfStats()
+      dlog("YOLO model loaded OK id=\(modelId) reason=\(reason)")
+      DLog.shared.log(newDet.startupSummary(), fields: [
+        "kind": "model_metrics",
+        "modelId": modelId,
+        "model": spec.displayName,
+        "precision": spec.valPrecision,
+        "recall": spec.valRecall,
+        "map50": spec.valMap50,
+        "map50_95": spec.valMap50_95,
+        "classes": spec.classNames,
+      ])
+      DispatchQueue.global(qos: .utility).async { [weak self] in
+        guard let self = self else { return }
+        self.detectorLock.lock()
+        let det = self.detector
+        self.detectorLock.unlock()
+        if let s = det?.runSelfTest() { dlog("SELF-TEST: \(s)") }
+      }
+    } catch {
+      lastDetectorError = "\(error)"
+      detectorLock.lock()
+      detector = nil
+      detectorLock.unlock()
+      dlog("FAILED to load model id=\(modelId): \(error)")
+    }
+  }
 }
 
 extension AppDelegate: FlutterStreamHandler {
@@ -437,21 +494,44 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 enum YoloError: Error { case modelNotFound, allocFailed, badTensor }
 
 final class YoloDetector {
-  static let modelDisplayName = "yolo26n_320_multiclass_no_mosaic_tail_20260512_073544"
-  static let modelAssetName =
-    "yolo26n_320_multiclass_no_mosaic_tail_20260512_073544_float16.tflite"
-  static let classNames = ["datamatrix", "code128", "pdf417"]
-  static let valPrecision: Float = 0.95583
-  static let valRecall: Float = 0.95400
-  static let valMap50: Float = 0.97400
-  static let valMap50_95: Float = 0.82577
+  struct ModelSpec {
+    let id: String
+    let displayName: String
+    let assetName: String
+    let classNames: [String]
+    let valPrecision: Float
+    let valRecall: Float
+    let valMap50: Float
+    let valMap50_95: Float
+  }
 
-  static func className(for id: Int) -> String {
-    guard id >= 0 && id < classNames.count else { return "cls\(id)" }
-    return classNames[id]
+  static let availableModels: [ModelSpec] = [
+    ModelSpec(
+      id: "multiclass_tail",
+      displayName: "yolo26n_320_multiclass_no_mosaic_tail_20260512_073544",
+      assetName: "yolo26n_320_multiclass_no_mosaic_tail_20260512_073544_float16.tflite",
+      classNames: ["datamatrix", "code128", "pdf417"],
+      valPrecision: 0.95583,
+      valRecall: 0.95400,
+      valMap50: 0.97400,
+      valMap50_95: 0.82577),
+    ModelSpec(
+      id: "latency_auto",
+      displayName: "train_latency_yolo26n_320_auto",
+      assetName: "train_latency_yolo26n_320_auto_float16.tflite",
+      classNames: ["datamatrix", "code128", "pdf417"],
+      valPrecision: 0.0,
+      valRecall: 0.0,
+      valMap50: 0.0,
+      valMap50_95: 0.0),
+  ]
+
+  static func spec(for id: String) -> ModelSpec? {
+    return availableModels.first { $0.id == id }
   }
 
   private let interpreter: Interpreter
+  let spec: ModelSpec
   private let inputW = 320
   private let inputH = 320
 
@@ -463,13 +543,14 @@ final class YoloDetector {
   private let outRows: Int    // 300
   private let outCols: Int    // 6
 
-  init() throws {
+  init(spec: ModelSpec) throws {
+    self.spec = spec
     // Flutter ships assets inside App.framework, NOT under Runner.app/.
     // Use FlutterDartProject.lookupKey(forAsset:) to translate the
     // pubspec asset path -> bundle resource key, then resolve via
     // Bundle.main.path(forResource:ofType:).
     let assetCandidates = [
-      "assets/models/\(Self.modelAssetName)",
+      "assets/models/\(spec.assetName)",
     ]
     var resolved: String? = nil
     for asset in assetCandidates {
@@ -490,7 +571,7 @@ final class YoloDetector {
         .appendingPathComponent("Frameworks")
       if let frameworks = try? fm.contentsOfDirectory(atPath: frameworksDir) {
         outer: for fw in frameworks where fw.hasSuffix(".framework") {
-          for name in [Self.modelAssetName] {
+          for name in [spec.assetName] {
             let candidate = (frameworksDir as NSString)
               .appendingPathComponent(fw)
               .appending("/flutter_assets/assets/models/\(name)")
@@ -567,12 +648,17 @@ final class YoloDetector {
   }
 
   func startupSummary() -> String {
-    let classes = Self.classNames.joined(separator: ",")
+    let classes = spec.classNames.joined(separator: ",")
     return String(
       format: "model=%@ classes=[%@] valP=%.3f valR=%.3f mAP50=%.3f mAP50-95=%.3f",
-      Self.modelDisplayName, classes,
-      Double(Self.valPrecision), Double(Self.valRecall),
-      Double(Self.valMap50), Double(Self.valMap50_95))
+      spec.displayName, classes,
+      Double(spec.valPrecision), Double(spec.valRecall),
+      Double(spec.valMap50), Double(spec.valMap50_95))
+  }
+
+  func className(for id: Int) -> String {
+    guard id >= 0 && id < spec.classNames.count else { return "cls\(id)" }
+    return spec.classNames[id]
   }
 
   func run(pixelBuffer: CVPixelBuffer, frameId: Int, threshold: Float) -> [[String: Any]] {
@@ -706,7 +792,7 @@ final class YoloDetector {
       var x2 = floats[base + 2]
       var y2 = floats[base + 3]
       let cls = Int(floats[base + 5].rounded())
-      let label = Self.className(for: cls)
+      let label = className(for: cls)
 
       // Some exports output coords normalized to 0..1, others output
       // model-space pixels (0..320). Support both without manual toggles.

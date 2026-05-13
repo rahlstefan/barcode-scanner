@@ -3,6 +3,14 @@ import 'package:flutter/foundation.dart';
 const String kModelDisplayName =
     'yolo26n_320_multiclass_no_mosaic_tail_20260512_073544';
 
+const String kModelIdMulticlassTail = 'multiclass_tail';
+const String kModelIdLatencyAuto = 'latency_auto';
+
+const Map<String, String> kModelNames = {
+  kModelIdMulticlassTail: 'yolo26n_320_multiclass_no_mosaic_tail_20260512_073544',
+  kModelIdLatencyAuto: 'train_latency_yolo26n_320_auto',
+};
+
 const Map<int, String> kDetectionClassNames = {
   0: 'datamatrix',
   1: 'code128',

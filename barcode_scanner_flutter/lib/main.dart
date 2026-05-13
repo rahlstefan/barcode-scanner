@@ -42,6 +42,8 @@ class _ScannerPageState extends State<ScannerPage> {
 
   StreamSubscription<List<Detection>>? _sub;
   List<SmoothedDetection> _smoothed = const [];
+  String _modelId = kModelIdMulticlassTail;
+  bool _switchingModel = false;
   // Model input frame is 320x320 (square). We render in normalized coords so
   // the actual frame size used here only matters for aspect mapping.
   final Size _frameSize = const Size(1, 1);
@@ -49,10 +51,46 @@ class _ScannerPageState extends State<ScannerPage> {
   @override
   void initState() {
     super.initState();
+    _initModelSelection();
     _sub = DetectionStream.stream().listen((raw) {
       final out = _buffer.append(raw);
       if (mounted) setState(() => _smoothed = out);
     });
+  }
+
+  Future<void> _initModelSelection() async {
+    try {
+      final id = await DetectionStream.getModel();
+      if (!mounted) return;
+      if (kModelNames.containsKey(id)) {
+        setState(() => _modelId = id);
+      }
+    } catch (_) {
+      // Keep default model id if native side is unavailable.
+    }
+  }
+
+  Future<void> _switchModel(String id) async {
+    if (_switchingModel || id == _modelId) return;
+    setState(() => _switchingModel = true);
+    try {
+      await DetectionStream.setModel(id);
+      if (!mounted) return;
+      setState(() {
+        _modelId = id;
+        _smoothed = const [];
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Model switched: ${kModelNames[id] ?? id}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Model switch failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _switchingModel = false);
+    }
   }
 
   @override
@@ -85,11 +123,39 @@ class _ScannerPageState extends State<ScannerPage> {
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Text(
-                '${kModelDisplayName.split('_').first.toUpperCase()} • ${_smoothed.length}',
+                '${(kModelNames[_modelId] ?? kModelDisplayName)} • ${_smoothed.length}',
                 style: const TextStyle(
                     color: Colors.white,
                     fontSize: 14,
                     fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 48,
+            right: 16,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: DropdownButtonHideUnderline(
+                child: DropdownButton<String>(
+                  value: _modelId,
+                  dropdownColor: Colors.black87,
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                  iconEnabledColor: Colors.white,
+                  onChanged: _switchingModel ? null : (v) {
+                    if (v != null) _switchModel(v);
+                  },
+                  items: kModelNames.entries.map((e) {
+                    return DropdownMenuItem<String>(
+                      value: e.key,
+                      child: Text(e.value),
+                    );
+                  }).toList(growable: false),
+                ),
               ),
             ),
           ),

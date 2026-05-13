@@ -54,6 +54,26 @@ class DetectionStream {
     await _control.invokeMethod('setConfidence', {'value': t});
   }
 
+  static Future<void> setModel(String modelId) async {
+    await _control.invokeMethod('setModel', {'id': modelId});
+  }
+
+  static Future<String> getModel() async {
+    final r = await _control.invokeMethod<String>('getModel');
+    return r ?? 'multiclass_tail';
+  }
+
+  static Future<List<Map<String, dynamic>>> listModels() async {
+    final r = await _control.invokeMethod<List<dynamic>>('listModels') ?? const [];
+    return r
+        .map((e) => (e as Map).cast<dynamic, dynamic>())
+        .map((m) => {
+              'id': (m['id'] ?? '').toString(),
+              'name': (m['name'] ?? '').toString(),
+            })
+        .toList(growable: false);
+  }
+
   static Future<String> runSelfTest() async {
     final r = await _control.invokeMethod<String>('selfTest');
     return r ?? '<null>';
