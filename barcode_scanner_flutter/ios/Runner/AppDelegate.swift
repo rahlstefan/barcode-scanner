@@ -531,6 +531,7 @@ final class YoloDetector {
   }
 
   private let interpreter: Interpreter
+  private let interpreterLock = NSLock()
   let spec: ModelSpec
   private let inputW = 320
   private let inputH = 320
@@ -667,6 +668,8 @@ final class YoloDetector {
       if logThis { dlog("preprocess returned nil") }
       return []
     }
+    interpreterLock.lock()
+    defer { interpreterLock.unlock() }
     do {
       try interpreter.copy(inputData, toInputAt: 0)
       try interpreter.invoke()
@@ -853,6 +856,8 @@ final class YoloDetector {
       }
     }
     do {
+      interpreterLock.lock()
+      defer { interpreterLock.unlock() }
       let data = inp.withUnsafeBufferPointer { Data(buffer: $0) }
       try interpreter.copy(data, toInputAt: 0)
       try interpreter.invoke()
