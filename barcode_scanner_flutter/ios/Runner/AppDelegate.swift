@@ -691,6 +691,9 @@ final class YoloDetector {
     var topScore: Float = 0
     var topIdx: Int = 0
     var nAboveZero = 0
+    var pixelCoordRows = 0
+    var normalizedRows = 0
+    var droppedGeom = 0
 
     for i in 0..<n {
       let base = i * k
@@ -704,9 +707,26 @@ final class YoloDetector {
       var y2 = floats[base + 3]
       let cls = Int(floats[base + 5].rounded())
       let label = Self.className(for: cls)
+
+      // Some exports output coords normalized to 0..1, others output
+      // model-space pixels (0..320). Support both without manual toggles.
+      let coordAbsMax = max(abs(x1), abs(y1), abs(x2), abs(y2))
+      if coordAbsMax > 2.0 {
+        x1 /= Float(inputW)
+        x2 /= Float(inputW)
+        y1 /= Float(inputH)
+        y2 /= Float(inputH)
+        pixelCoordRows += 1
+      } else {
+        normalizedRows += 1
+      }
+
       x1 = min(max(x1, 0), 1); y1 = min(max(y1, 0), 1)
       x2 = min(max(x2, 0), 1); y2 = min(max(y2, 0), 1)
-      if x2 <= x1 || y2 <= y1 { continue }
+      if x2 <= x1 || y2 <= y1 {
+        droppedGeom += 1
+        continue
+      }
       out.append([
         "x1": x1, "y1": y1, "x2": x2, "y2": y2,
         "score": conf, "cls": cls, "label": label, "fid": frameId,
@@ -717,8 +737,10 @@ final class YoloDetector {
     if logThis {
       let b = topIdx * k
       let row: [Float] = (0..<k).map { floats[b + $0] }
-      dlog(String(format: "decode rows=%d nonZero=%d topScore=%.3f kept=%d (thr=%.2f)",
-                  n, nAboveZero, Double(topScore), out.count, Double(threshold)))
+      let mode = pixelCoordRows > normalizedRows ? "pixel320" : "norm01"
+      dlog(String(format: "decode rows=%d nonZero=%d topScore=%.3f kept=%d droppedGeom=%d mode=%@ (thr=%.2f)",
+                  n, nAboveZero, Double(topScore), out.count, droppedGeom, mode,
+                  Double(threshold)))
       dlog("decode topRow#\(topIdx)=\(row.map { String(format: "%.3f", $0) })")
     }
     return out
