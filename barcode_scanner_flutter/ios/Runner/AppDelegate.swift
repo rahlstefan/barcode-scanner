@@ -524,6 +524,15 @@ final class YoloDetector {
       valRecall: 0.0,
       valMap50: 0.0,
       valMap50_95: 0.0),
+    ModelSpec(
+      id: "multiclass_5090",
+      displayName: "yolo26n_320_multiclass_5090_v5",
+      assetName: "yolo26n_320_multiclass_5090_v5_float16.tflite",
+      classNames: ["datamatrix", "code128", "pdf417"],
+      valPrecision: 0.95953,
+      valRecall: 0.96243,
+      valMap50: 0.98025,
+      valMap50_95: 0.83291),
   ]
 
   static func spec(for id: String) -> ModelSpec? {

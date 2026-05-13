@@ -20,3 +20,4 @@ flutter:
   assets:
     - assets/models/yolo26n_320_multiclass_no_mosaic_tail_20260512_073544_float16.tflite
     - assets/models/train_latency_yolo26n_320_auto_float16.tflite
+    - assets/models/yolo26n_320_multiclass_5090_v5_float16.tflite
