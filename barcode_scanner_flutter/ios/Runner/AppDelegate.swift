@@ -115,6 +115,7 @@ final class DLog {
   private var detector: YoloDetector?
   private let detectorLock = NSLock()
   private var lastDetectorError: String?
+  private var pendingPickResult: FlutterResult?
   private var currentModelId: String = "multiclass_tail"
   private var confidenceThreshold: Float = 0.25
   private weak var lastCameraView: CameraPreviewView?
@@ -174,7 +175,7 @@ final class DLog {
       case "getModel":
         result(self.currentModelId)
       case "listModels":
-        result(YoloDetector.availableModels.map { ["id": $0.id, "name": $0.displayName] })
+        result(YoloDetector.allModels.map { ["id": $0.id, "name": $0.displayName] })
       case "selfTest":
         self.detectorLock.lock()
         let det = self.detector
@@ -203,6 +204,17 @@ final class DLog {
         DLog.shared.clear()
         dlog("logs cleared")
         result(nil)
+      case "pickCustomModel":
+        self.pendingPickResult = result
+        DispatchQueue.main.async { [weak self] in
+          guard let self = self else { return }
+          let picker = UIDocumentPickerViewController(
+            documentTypes: ["public.data"],
+            in: .import)
+          picker.delegate = self
+          picker.allowsMultipleSelection = false
+          self.window?.rootViewController?.present(picker, animated: true)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -503,9 +515,10 @@ final class YoloDetector {
     let valRecall: Float
     let valMap50: Float
     let valMap50_95: Float
+    var customFilePath: String? = nil  // non-nil for user-loaded models
   }
 
-  static let availableModels: [ModelSpec] = [
+  static let builtInModels: [ModelSpec] = [
     ModelSpec(
       id: "multiclass_tail",
       displayName: "yolo26n_320_multiclass_no_mosaic_tail_20260512_073544",
@@ -535,8 +548,13 @@ final class YoloDetector {
       valMap50_95: 0.83291),
   ]
 
+  // User-loaded models (added at runtime via document picker).
+  static var customModels: [ModelSpec] = []
+
+  static var allModels: [ModelSpec] { builtInModels + customModels }
+
   static func spec(for id: String) -> ModelSpec? {
-    return availableModels.first { $0.id == id }
+    return allModels.first { $0.id == id }
   }
 
   private let interpreter: Interpreter
@@ -555,45 +573,54 @@ final class YoloDetector {
 
   init(spec: ModelSpec) throws {
     self.spec = spec
-    // Flutter ships assets inside App.framework, NOT under Runner.app/.
-    // Use FlutterDartProject.lookupKey(forAsset:) to translate the
-    // pubspec asset path -> bundle resource key, then resolve via
-    // Bundle.main.path(forResource:ofType:).
-    let assetCandidates = [
-      "assets/models/\(spec.assetName)",
-    ]
-    var resolved: String? = nil
-    for asset in assetCandidates {
-      let key = FlutterDartProject.lookupKey(forAsset: asset)
-      if let p = Bundle.main.path(forResource: key, ofType: nil) {
-        dlog("model resolved via FlutterDartProject: \(asset) -> key=\(key)")
-        resolved = p
-        break
-      } else {
-        dlog("FlutterDartProject lookup miss: asset=\(asset) key=\(key)")
-      }
+
+    // For user-loaded models, use the pre-copied file path directly.
+    var resolved: String? = spec.customFilePath
+    if let custom = resolved, !FileManager.default.fileExists(atPath: custom) {
+      dlog("custom model path not found: \(custom)")
+      throw YoloError.modelNotFound
     }
 
-    // Fallback 1: scan App.framework/flutter_assets directly.
     if resolved == nil {
-      let fm = FileManager.default
-      let frameworksDir = (Bundle.main.bundlePath as NSString)
-        .appendingPathComponent("Frameworks")
-      if let frameworks = try? fm.contentsOfDirectory(atPath: frameworksDir) {
-        outer: for fw in frameworks where fw.hasSuffix(".framework") {
-          for name in [spec.assetName] {
-            let candidate = (frameworksDir as NSString)
-              .appendingPathComponent(fw)
-              .appending("/flutter_assets/assets/models/\(name)")
-            if fm.fileExists(atPath: candidate) {
-              dlog("model resolved via framework scan: \(candidate)")
-              resolved = candidate
-              break outer
+      // Flutter ships assets inside App.framework, NOT under Runner.app/.
+      // Use FlutterDartProject.lookupKey(forAsset:) to translate the
+      // pubspec asset path -> bundle resource key, then resolve via
+      // Bundle.main.path(forResource:ofType:).
+      let assetCandidates = [
+        "assets/models/\(spec.assetName)",
+      ]
+      for asset in assetCandidates {
+        let key = FlutterDartProject.lookupKey(forAsset: asset)
+        if let p = Bundle.main.path(forResource: key, ofType: nil) {
+          dlog("model resolved via FlutterDartProject: \(asset) -> key=\(key)")
+          resolved = p
+          break
+        } else {
+          dlog("FlutterDartProject lookup miss: asset=\(asset) key=\(key)")
+        }
+      }
+
+      // Fallback: scan App.framework/flutter_assets directly.
+      if resolved == nil {
+        let fm = FileManager.default
+        let frameworksDir = (Bundle.main.bundlePath as NSString)
+          .appendingPathComponent("Frameworks")
+        if let frameworks = try? fm.contentsOfDirectory(atPath: frameworksDir) {
+          outer: for fw in frameworks where fw.hasSuffix(".framework") {
+            for name in [spec.assetName] {
+              let candidate = (frameworksDir as NSString)
+                .appendingPathComponent(fw)
+                .appending("/flutter_assets/assets/models/\(name)")
+              if fm.fileExists(atPath: candidate) {
+                dlog("model resolved via framework scan: \(candidate)")
+                resolved = candidate
+                break outer
+              }
             }
           }
         }
       }
-    }
+    } // end if resolved == nil
 
     guard let path = resolved else {
       // Diagnostic dump of bundle contents.
@@ -891,5 +918,68 @@ final class YoloDetector {
     } catch {
       return "self-test error: \(error)"
     }
+  }
+}
+
+// ---------------------------------------------------------------------
+// MARK: - UIDocumentPickerDelegate
+// ---------------------------------------------------------------------
+
+extension AppDelegate: UIDocumentPickerDelegate {
+  func documentPicker(
+    _ controller: UIDocumentPickerViewController,
+    didPickDocumentsAt urls: [URL]
+  ) {
+    guard let url = urls.first else {
+      pendingPickResult?(FlutterError(code: "no_file",
+                                     message: "No file selected", details: nil))
+      pendingPickResult = nil
+      return
+    }
+    // Copy to Documents for persistence (import mode gives a temp URL).
+    let docs = FileManager.default.urls(for: .documentDirectory,
+                                        in: .userDomainMask).first!
+    let destURL = docs.appendingPathComponent(url.lastPathComponent)
+    do {
+      if FileManager.default.fileExists(atPath: destURL.path) {
+        try FileManager.default.removeItem(at: destURL)
+      }
+      try FileManager.default.copyItem(at: url, to: destURL)
+    } catch {
+      pendingPickResult?(FlutterError(code: "copy_failed",
+                                     message: "\(error)", details: nil))
+      pendingPickResult = nil
+      return
+    }
+    let fileName = url.deletingPathExtension().lastPathComponent
+    let modelId  = "custom_\(fileName)"
+    let customSpec = YoloDetector.ModelSpec(
+      id: modelId,
+      displayName: fileName,
+      assetName: "",
+      classNames: ["datamatrix", "code128", "pdf417"],
+      valPrecision: 0,
+      valRecall: 0,
+      valMap50: 0,
+      valMap50_95: 0,
+      customFilePath: destURL.path)
+    YoloDetector.customModels.removeAll { $0.id == modelId }
+    YoloDetector.customModels.append(customSpec)
+    dlog("custom model registered: id=\(modelId) path=\(destURL.path)")
+    loadDetector(modelId: modelId, reason: "custom-pick")
+    if detector != nil {
+      pendingPickResult?(["id": modelId, "name": fileName])
+    } else {
+      pendingPickResult?(FlutterError(code: "load_failed",
+                                     message: lastDetectorError ?? "load failed",
+                                     details: nil))
+    }
+    pendingPickResult = nil
+  }
+
+  func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    pendingPickResult?(FlutterError(code: "cancelled",
+                                   message: "cancelled", details: nil))
+    pendingPickResult = nil
   }
 }

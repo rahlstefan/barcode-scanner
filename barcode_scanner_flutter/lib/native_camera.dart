@@ -92,6 +92,15 @@ class DetectionStream {
   static Future<void> clearNativeLogs() async {
     await _control.invokeMethod('clearLogs');
   }
+
+  static Future<Map<String, String>?> pickCustomModel() async {
+    final r = await _control.invokeMethod<Map<dynamic, dynamic>>('pickCustomModel');
+    if (r == null) return null;
+    return {
+      'id': (r['id'] ?? '').toString(),
+      'name': (r['name'] ?? '').toString(),
+    };
+  }
 }
 
 /// Native log line stream (mirrors NSLog into the app via EventChannel

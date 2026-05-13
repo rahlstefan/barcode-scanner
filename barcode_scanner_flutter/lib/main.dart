@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'detection.dart';
 import 'temporal_detection_buffer.dart';
 import 'bbox_painter.dart';
@@ -44,6 +45,8 @@ class _ScannerPageState extends State<ScannerPage> {
   List<SmoothedDetection> _smoothed = const [];
   String _modelId = kModelIdMulticlassTail;
   bool _switchingModel = false;
+  bool _loadingCustomModel = false;
+  late Map<String, String> _modelMap;
   // Model input frame is 320x320 (square). We render in normalized coords so
   // the actual frame size used here only matters for aspect mapping.
   final Size _frameSize = const Size(1, 1);
@@ -51,6 +54,7 @@ class _ScannerPageState extends State<ScannerPage> {
   @override
   void initState() {
     super.initState();
+    _modelMap = Map.from(kModelNames);
     _initModelSelection();
     _sub = DetectionStream.stream().listen((raw) {
       final out = _buffer.append(raw);
@@ -62,11 +66,44 @@ class _ScannerPageState extends State<ScannerPage> {
     try {
       final id = await DetectionStream.getModel();
       if (!mounted) return;
-      if (kModelNames.containsKey(id)) {
+      if (_modelMap.containsKey(id)) {
         setState(() => _modelId = id);
       }
     } catch (_) {
       // Keep default model id if native side is unavailable.
+    }
+  }
+
+  Future<void> _loadCustomModel() async {
+    if (_loadingCustomModel) return;
+    setState(() => _loadingCustomModel = true);
+    try {
+      final info = await DetectionStream.pickCustomModel();
+      if (info == null) return;
+      final id = info['id'] as String;
+      final name = info['name'] as String;
+      if (!mounted) return;
+      setState(() {
+        _modelMap[id] = name;
+        _modelId = id;
+        _smoothed = const [];
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Custom model loaded: $name')),
+      );
+    } on PlatformException catch (e) {
+      if (e.code == 'cancelled') return;
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Load failed: ${e.message}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Load failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _loadingCustomModel = false);
     }
   }
 
@@ -134,29 +171,53 @@ class _ScannerPageState extends State<ScannerPage> {
           Positioned(
             top: 48,
             right: 16,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: _modelId,
-                  dropdownColor: Colors.black87,
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                  iconEnabledColor: Colors.white,
-                  onChanged: _switchingModel ? null : (v) {
-                    if (v != null) _switchModel(v);
-                  },
-                  items: kModelNames.entries.map((e) {
-                    return DropdownMenuItem<String>(
-                      value: e.key,
-                      child: Text(e.value),
-                    );
-                  }).toList(growable: false),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _modelMap.containsKey(_modelId) ? _modelId : _modelMap.keys.first,
+                      dropdownColor: Colors.black87,
+                      style: const TextStyle(color: Colors.white, fontSize: 13),
+                      iconEnabledColor: Colors.white,
+                      onChanged: _switchingModel ? null : (v) {
+                        if (v != null) _switchModel(v);
+                      },
+                      items: _modelMap.entries.map((e) {
+                        return DropdownMenuItem<String>(
+                          value: e.key,
+                          child: Text(e.value),
+                        );
+                      }).toList(growable: false),
+                    ),
+                  ),
                 ),
-              ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: _loadingCustomModel ? null : _loadCustomModel,
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: _loadingCustomModel
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Colors.white))
+                        : const Icon(Icons.folder_open,
+                            color: Colors.white, size: 18),
+                  ),
+                ),
+              ],
             ),
           ),
           const DebugLogOverlay(),

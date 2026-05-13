@@ -5,10 +5,12 @@ const String kModelDisplayName =
 
 const String kModelIdMulticlassTail = 'multiclass_tail';
 const String kModelIdLatencyAuto = 'latency_auto';
+const String kModelIdMulticlass5090 = 'multiclass_5090';
 
 const Map<String, String> kModelNames = {
   kModelIdMulticlassTail: 'yolo26n_320_multiclass_no_mosaic_tail_20260512_073544',
   kModelIdLatencyAuto: 'train_latency_yolo26n_320_auto',
+  kModelIdMulticlass5090: 'yolo26n_320_multiclass_5090_v5',
 };
 
 const Map<int, String> kDetectionClassNames = {
