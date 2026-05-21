@@ -15,19 +15,23 @@ Pod::Spec.new do |s|
 
   s.source_files     = 'CRPTZXBridge.h', 'CRPTZXBridge.mm'
   s.public_header_files = 'CRPTZXBridge.h'
-  s.vendored_frameworks = '../third_party/ZXingCpp.xcframework'
+  s.vendored_frameworks = '../third_party/ZXingCpp.xcframework', '../third_party/opencv2.framework'
+  s.frameworks = 'CoreVideo'
+  s.libraries = 'c++'
 
   s.pod_target_xcconfig = {
     'CLANG_CXX_LANGUAGE_STANDARD' => 'gnu++17',
     'CLANG_CXX_LIBRARY' => 'libc++',
     # Device-only ZXingCpp slice from CI (ios-arm64).
     'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/Headers" "${PODS_ROOT}/../third_party/opencv2.framework/Headers"',
-    'FRAMEWORK_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../third_party" "${PODS_ROOT}/../third_party/ZXingCpp.xcframework/ios-arm64"'
+    'FRAMEWORK_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../third_party" "${PODS_ROOT}/../third_party/ZXingCpp.xcframework/ios-arm64"',
+    # user_target_xcconfig does NOT apply to the pod target; link deps here.
+    'OTHER_LDFLAGS' => '$(inherited) -framework ZXing -framework opencv2'
   }
 
-  # ZXing (CRPT) is built against opencv2; Runner must link it when using vendored ZXingCpp.
+  # Runner must also link/embed vendored ZXing + OpenCV (transitive from CRPTZXBridge).
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '$(inherited) -framework opencv2 -framework ZXing',
+    'OTHER_LDFLAGS' => '$(inherited) -framework ZXing -framework opencv2',
     'FRAMEWORK_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../third_party" "${PODS_ROOT}/../third_party/ZXingCpp.xcframework/ios-arm64"'
   }
 end

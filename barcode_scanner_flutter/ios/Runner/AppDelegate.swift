@@ -1,6 +1,7 @@
 import UIKit
 import Flutter
 import AVFoundation
+import CoreVideo
 import TensorFlowLite
 import Accelerate
 #if canImport(CRPTZXBridge)

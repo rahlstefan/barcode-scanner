@@ -62,9 +62,19 @@ post_install do |installer|
       if target.name == 'CRPTZXBridge'
         zxing_headers = File.join(__dir__, 'third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/Headers')
         opencv_headers = File.join(__dir__, 'third_party/opencv2.framework/Headers')
+        third_party = File.join(__dir__, 'third_party')
+        zxing_slice = File.join(__dir__, 'third_party/ZXingCpp.xcframework/ios-arm64')
         config.build_settings['HEADER_SEARCH_PATHS'] ||= '$(inherited)'
         config.build_settings['HEADER_SEARCH_PATHS'] = "#{config.build_settings['HEADER_SEARCH_PATHS']} \"#{zxing_headers}\" \"#{opencv_headers}\""
+        config.build_settings['FRAMEWORK_SEARCH_PATHS'] ||= '$(inherited)'
+        config.build_settings['FRAMEWORK_SEARCH_PATHS'] = "#{config.build_settings['FRAMEWORK_SEARCH_PATHS']} \"#{third_party}\" \"#{zxing_slice}\""
         config.build_settings['GCC_PREFIX_HEADER'] = ''
+        flags = config.build_settings['OTHER_LDFLAGS'] || '$(inherited)'
+        %w[ZXing opencv2 CoreVideo].each do |fw|
+          flag = "-framework #{fw}"
+          flags = "#{flags} #{flag}" unless flags.include?(flag)
+        end
+        config.build_settings['OTHER_LDFLAGS'] = flags
       end
     end
   end
