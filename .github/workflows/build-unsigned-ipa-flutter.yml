@@ -6,7 +6,12 @@ on:
     paths:
       - "barcode_scanner_flutter/**"
       - ".github/workflows/build-unsigned-ipa-flutter.yml"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      rebuild_epoch8:
+        description: Force rebuild ZXingCpp.xcframework (ignore cache)
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -102,7 +107,18 @@ jobs:
           sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 12.0;/IPHONEOS_DEPLOYMENT_TARGET = 13.0;/g" ios/Runner.xcodeproj/project.pbxproj
           grep IPHONEOS_DEPLOYMENT_TARGET ios/Runner.xcodeproj/project.pbxproj
 
+      # Reuse prebuilt ZXingCpp + OpenCV when CI inputs unchanged (~2–3 min saved per run).
+      - name: Restore epoch8 third_party cache
+        id: epoch8-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/third_party/ZXingCpp.xcframework
+            ios/third_party/opencv2.framework
+          key: epoch8-ios-${{ hashFiles('barcode_scanner_flutter/ci/patch_epoch8_cmake_ios.py', 'barcode_scanner_flutter/ci/epoch8-build-release.sh') }}-opencv4.10.0-epoch8@crpt-prod-fixed-mediapipe-10.30-xcode16.4
+
       - name: Build epoch8 ZXingCpp.xcframework (CRPT)
+        if: steps.epoch8-cache.outputs.cache-hit != 'true' || github.event.inputs.rebuild_epoch8 == 'true'
         run: |
           set -euo pipefail
           EPOCH8_LOG="$PWD/epoch8_build.log"
@@ -157,6 +173,14 @@ jobs:
           rm -rf ios/third_party/opencv2.framework
           cp -R "$OPENCV_FRAMEWORK" ios/third_party/opencv2.framework
           find ios/third_party -maxdepth 2 -type d -print
+
+      - name: Use cached epoch8 third_party
+        if: steps.epoch8-cache.outputs.cache-hit == 'true' && github.event.inputs.rebuild_epoch8 != 'true'
+        run: |
+          echo 'Cache hit: skipping epoch8 clone/cmake/xcodebuild'
+          test -d ios/third_party/ZXingCpp.xcframework
+          test -d ios/third_party/opencv2.framework
+          ls -la ios/third_party
 
       - name: Show epoch8 build log tail on failure
         if: failure()
