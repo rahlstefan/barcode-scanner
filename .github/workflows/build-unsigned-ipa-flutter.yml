@@ -141,30 +141,39 @@ jobs:
               '    target_link_libraries(opencv_interface INTERFACE "-framework opencv2")\n'
               '    set(OpenCV_FOUND TRUE)\n'
               '    set(OpenCV_LIBS opencv_interface)\n'
+              'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)\n'
           )
 
-          needle = 'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)'
+          # epoch8 uses `if` (not elseif) for the Linux pkg-config branch.
+          needle = 'if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)'
           if needle not in s:
               raise RuntimeError('epoch8 CMakeLists layout changed: cannot find Linux/Android OpenCV branch')
           if 'CMAKE_SYSTEM_NAME STREQUAL "iOS"' not in s:
-              s = s.replace(needle, ios_block + needle, 1)
-              print('Patched: inserted iOS OpenCV block before Linux pkg-config branch')
+              s = s.replace(needle, ios_block, 1)
+              print('Patched: iOS OpenCV + elseif Linux pkg-config branch')
           else:
               print('INFO: iOS OpenCV block already present')
 
-          # iOS must see OpenCV headers when linking ZXing (not only WIN32).
-          link_needle = 'else()\n    # Linux/Windows build paths\n    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})'
+          link_needle = (
+              'else()\n'
+              '    # Linux build: use opencv_interface from pkg-config\n'
+              '    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})'
+          )
           link_repl = (
               'else()\n'
-              '    # Linux/Windows/iOS build paths\n'
+              '    # Linux/iOS build: opencv_interface from pkg-config or iOS framework\n'
               '    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
               '        target_include_directories(ZXing PUBLIC ${OpenCV_INCLUDE_DIRS})\n'
               '    endif()\n'
               '    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})'
           )
-          if link_needle in s and 'Linux/Windows/iOS build paths' not in s:
+          if link_needle in s and 'Linux/iOS build' not in s:
               s = s.replace(link_needle, link_repl, 1)
               print('Patched: OpenCV includes for iOS ZXing target')
+          elif 'Linux/iOS build' in s:
+              print('INFO: link block already patched')
+          else:
+              print('WARN: OpenCV link block not found; file layout may have changed')
 
           s = s.replace('opencv_gapi', '')
           p.write_text(s, encoding='utf-8')
