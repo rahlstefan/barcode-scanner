@@ -148,7 +148,7 @@ jobs:
             exit 65
           fi
 
-          test -d ../_epoch8_zxing_cpp/wrappers/ios/ZXingCpp.xcframework \
+          test -d ZXingCpp.xcframework \
             || (echo 'ERROR: ZXingCpp.xcframework missing after build-release.sh'; exit 1)
 
           cd ../../../barcode_scanner_flutter
