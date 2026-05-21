@@ -123,7 +123,7 @@ jobs:
           src = src.replace(
               'if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)',
               'if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-              '    find_package(OpenCV REQUIRED COMPONENTS core imgproc PATHS ${OpenCV_DIR} NO_DEFAULT_PATH)\n\n'
+              '    find_package(OpenCV REQUIRED COMPONENTS core imgproc)\n\n'
               '    add_library(opencv_interface INTERFACE)\n'
               '    target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})\n'
               '    target_link_directories(opencv_interface INTERFACE ${OpenCV_LIBRARY_DIRS})\n'
@@ -150,20 +150,28 @@ jobs:
           print('Patched', p)
           PY
 
-          export OpenCV_DIR="$(brew --prefix opencv)/lib/cmake/opencv4"
+          OPENCV_PREFIX="$(brew --prefix opencv)"
+          export OpenCV_DIR="$OPENCV_PREFIX/lib/cmake/opencv4"
+          export CMAKE_PREFIX_PATH="$OpenCV_DIR:$OPENCV_PREFIX:${CMAKE_PREFIX_PATH:-}"
+          test -f "$OpenCV_DIR/OpenCVConfig.cmake"
           # Ensure wrappers/ios build script forwards OpenCV_DIR and removes
           # opencv_gapi from generated Xcode project before xcodebuild.
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           p = Path('../_epoch8_zxing_cpp/wrappers/ios/build-release.sh')
           s = p.read_text(encoding='utf-8')
 
-          s = s.replace(
-              'cmake -S../../ -B_builds -GXcode \\\n+    -DCMAKE_SYSTEM_NAME=iOS \\\n+',
-              'cmake -S../../ -B_builds -GXcode \\\n+    -DCMAKE_SYSTEM_NAME=iOS \\\n+    -DOpenCV_DIR="${OpenCV_DIR}" \\\n+',
-              1,
+          # Inject OpenCV cache args right after CMAKE_SYSTEM_NAME=iOS line.
+          s, n = re.subn(
+            r'(\n\s*-DCMAKE_SYSTEM_NAME=iOS \\\\n)',
+            r'\1    -DOpenCV_DIR="${OpenCV_DIR}" \\\n    -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}" \\\n',
+            s,
+            count=1,
           )
+          if n == 0:
+            raise RuntimeError('Failed to inject OpenCV args into build-release.sh')
 
           inject_marker = 'echo ========= Build the sdk for simulators\n'
           inject_block = (
