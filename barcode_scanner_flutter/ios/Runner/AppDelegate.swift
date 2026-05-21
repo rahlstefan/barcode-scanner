@@ -138,7 +138,10 @@ final class DLog {
   ) -> Bool {
     dlog("===== AppDelegate.didFinishLaunching =====")
     GeneratedPluginRegistrant.register(with: self)
-    let controller = window?.rootViewController as! FlutterViewController
+    guard let controller = window?.rootViewController as? FlutterViewController else {
+      dlog("ERROR: rootViewController is not FlutterViewController (window=\(String(describing: window)))")
+      return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    }
     let messenger = controller.binaryMessenger
 
     // 1. Logs EventChannel — register FIRST so Dart can attach early.
