@@ -170,8 +170,8 @@ jobs:
             if not m:
               raise RuntimeError('Failed to locate iOS cmake line in build-release.sh')
             insertion = (
-              f'    -DOpenCV_DIR="${{OpenCV_DIR}}" \\{nl}'
-              f'    -DCMAKE_PREFIX_PATH="${{CMAKE_PREFIX_PATH}}" \\{nl}'
+              '    -DOpenCV_DIR="${OpenCV_DIR}" \\' + nl +
+              '    -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}" \\' + nl
             )
             s = s[:m.end()] + insertion + s[m.end():]
 
