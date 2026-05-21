@@ -112,6 +112,19 @@ jobs:
             --branch crpt-prod-fixed-mediapipe-10.30 \
             https://github.com/epoch8/zxing-cpp.git ../_epoch8_zxing_cpp
 
+          # Homebrew OpenCV on macOS runners does not provide an iOS-linkable
+          # opencv_gapi for this framework build. Remove that module from
+          # link-lists in the cloned dependency before generating Xcode project.
+          GAPI_FILES=$(grep -RIl "opencv_gapi" ../_epoch8_zxing_cpp || true)
+          if [ -n "$GAPI_FILES" ]; then
+            echo "Patching opencv_gapi references:"
+            echo "$GAPI_FILES"
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              sed -i '' -E "s/[[:space:]]opencv_gapi([[:space:]\);\"]|$)/\1/g" "$f"
+            done <<< "$GAPI_FILES"
+          fi
+
           export OpenCV_DIR="$(brew --prefix opencv)/lib/cmake/opencv4"
           cd ../_epoch8_zxing_cpp/wrappers/ios
           ./build-release.sh
