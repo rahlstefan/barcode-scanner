@@ -102,6 +102,32 @@ jobs:
           sed -i '' "s/IPHONEOS_DEPLOYMENT_TARGET = 12.0;/IPHONEOS_DEPLOYMENT_TARGET = 13.0;/g" ios/Runner.xcodeproj/project.pbxproj
           grep IPHONEOS_DEPLOYMENT_TARGET ios/Runner.xcodeproj/project.pbxproj
 
+      - name: Build epoch8 ZXingCpp.xcframework (CRPT)
+        run: |
+          set -euo pipefail
+          brew list opencv >/dev/null 2>&1 || brew install opencv
+
+          rm -rf ../_epoch8_zxing_cpp
+          git clone --depth 1 \
+            --branch crpt-prod-fixed-mediapipe-10.30 \
+            https://github.com/epoch8/zxing-cpp.git ../_epoch8_zxing_cpp
+
+          export OpenCV_DIR="$(brew --prefix opencv)/lib/cmake/opencv4"
+          cd ../_epoch8_zxing_cpp/wrappers/ios
+          ./build-release.sh
+
+          cd ../../../barcode_scanner_flutter
+          rm -rf ios/third_party/ZXingCpp.xcframework
+          cp -R ../_epoch8_zxing_cpp/wrappers/ios/ZXingCpp.xcframework ios/third_party/ZXingCpp.xcframework
+          find ios/third_party/ZXingCpp.xcframework -maxdepth 2 -type d -print
+
+      - name: Verify CRPT symbols in epoch8 framework
+        run: |
+          set -euo pipefail
+          BIN="ios/third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/ZXing"
+          test -f "$BIN"
+          nm "$BIN" | grep -E "readbarcodescrpt_samplegridv1|readbarcodescrpt_detector_v1_samplegridv1"
+
       - name: Pod install
         run: |
           cd ios

@@ -6,9 +6,24 @@
 #include "ZXing/BarcodeFormat.h"
 #include "ZXing/DecodeHints.h"
 #include "ZXing/ImageView.h"
+#include "ZXing/Point.h"
 #include "ZXing/ReadBarcode.h"
 
 @implementation CRPTZXBridge
+
+static NSString *FirstText(const ZXing::Results& results)
+{
+    if (results.empty()) {
+        return nil;
+    }
+    const std::string text = results.front().text();
+    if (text.empty()) {
+        return nil;
+    }
+    return [[NSString alloc] initWithBytes:text.data()
+                                    length:text.size()
+                                  encoding:NSUTF8StringEncoding];
+}
 
 + (nullable NSString *)decodeInPixelBuffer:(CVPixelBufferRef)pixelBuffer
                                         x1:(float)x1
@@ -61,9 +76,14 @@
         hints.setTryDownscale(true);
         hints.setMaxNumberOfSymbols(1);
 
+        // Full-frame image view for detector_v1 API path.
+        ImageView fullIv(base, pbW, pbH, ImageFormat::BGRX, stride);
+
         switch ((int)cls) {
             case 0:
                 hints.setFormats(BarcodeFormat::DataMatrix);
+                hints.setBinarizer(Binarizer::LocalAverage);
+                hints.setTryDenoise(true);
                 break;
             case 1:
                 hints.setFormats(BarcodeFormat::Code128);
@@ -79,18 +99,28 @@
         const uint8_t *cropBase = base + cy1 * stride + cx1 * 4;
         ImageView iv(cropBase, cropW, cropH, ImageFormat::BGRX, stride);
 
-        auto results = ReadBarcodes(iv, hints);
-        if (results.empty()) {
-            return nil;
+        if ((int)cls == 0) {
+            // 1) CRPT detector_v1 path using YOLO box as normalized quad.
+            auto P0 = PointF((float)cx1 / (float)pbW, (float)cy1 / (float)pbH); // TL
+            auto P1 = PointF((float)cx1 / (float)pbW, (float)cy2 / (float)pbH); // BL
+            auto P2 = PointF((float)cx2 / (float)pbW, (float)cy2 / (float)pbH); // BR
+            auto P3 = PointF((float)cx2 / (float)pbW, (float)cy1 / (float)pbH); // TR
+
+            auto detV1 = readbarcodescrpt_detector_v1_samplegridv1(fullIv, P0, P1, P2, P3, hints);
+            if (NSString *txt = FirstText(detV1)) {
+                return txt;
+            }
+
+            // 2) CRPT sample-grid path over crop.
+            auto sg = readbarcodescrpt_samplegridv1(iv, hints, false);
+            if (NSString *txt = FirstText(sg)) {
+                return txt;
+            }
         }
 
-        const std::string text = results.front().text();
-        if (text.empty()) {
-            return nil;
-        }
-        return [[NSString alloc] initWithBytes:text.data()
-                                        length:text.size()
-                                      encoding:NSUTF8StringEncoding];
+        // 3) Generic path for non-DM formats and final fallback for DM.
+        auto results = ReadBarcodes(iv, hints);
+        return FirstText(results);
     } @catch (__unused NSException *e) {
         return nil;
     } @finally {
