@@ -553,7 +553,7 @@ private final class Epoch8Backend: BarcodeDecodingBackend {
     x1: Float, y1: Float, x2: Float, y2: Float,
     cls: Int
   ) -> String? {
-    return CRPTZXBridge.decode(inPixelBuffer: pixelBuffer,
+    return CRPTZXBridge.decode(in: pixelBuffer,
                                x1: x1, y1: y1, x2: x2, y2: y2,
                                cls: cls)
   }
