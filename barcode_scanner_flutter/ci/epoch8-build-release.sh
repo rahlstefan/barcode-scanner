@@ -39,14 +39,14 @@ strip_spurious_opencv_refs() {
 strip_spurious_opencv_refs
 
 echo "========= Build the sdk for iOS (device)"
+# Do not pass HEADER_SEARCH_PATHS on the command line — it overwrites core/src from CMake.
 cmake --build _builds --config Release --target ZXing -- \
   -sdk iphoneos \
   -arch arm64 \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   DEVELOPMENT_TEAM= \
-  FRAMEWORK_SEARCH_PATHS="${OpenCV_FRAMEWORK_DIR}" \
-  HEADER_SEARCH_PATHS="${OpenCV_INCLUDE_DIRS}"
+  FRAMEWORK_SEARCH_PATHS="${OpenCV_FRAMEWORK_DIR}"
 
 FRAMEWORK_DEVICE="$(find _builds -type d -path '*Release-iphoneos*/ZXing.framework' | head -n 1)"
 if [ -z "${FRAMEWORK_DEVICE}" ] || [ ! -d "${FRAMEWORK_DEVICE}" ]; then

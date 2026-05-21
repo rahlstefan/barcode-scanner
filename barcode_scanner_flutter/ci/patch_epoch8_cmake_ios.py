@@ -52,10 +52,10 @@ def main() -> int:
         "    # Linux/iOS build: opencv_interface (Linux) or opencv2_ios_framework (iOS)\n"
         "    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})\n"
         "    if(CMAKE_SYSTEM_NAME STREQUAL \"iOS\")\n"
+        "        # Do NOT set XCODE_ATTRIBUTE_HEADER_SEARCH_PATHS — it replaces CMake's core/src path.\n"
         "        target_include_directories(ZXing PRIVATE \"${OpenCV_INCLUDE_DIRS_ABS}\")\n"
         "        set_target_properties(ZXing PROPERTIES\n"
         "            XCODE_ATTRIBUTE_FRAMEWORK_SEARCH_PATHS \"${OpenCV_FRAMEWORK_DIR_ABS}\"\n"
-        "            XCODE_ATTRIBUTE_HEADER_SEARCH_PATHS \"${OpenCV_INCLUDE_DIRS_ABS}\"\n"
         "            XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO\n"
         "            XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED NO\n"
         "            XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY \"\"\n"
@@ -66,11 +66,19 @@ def main() -> int:
     )
     if link_needle in s and "Linux/iOS build" not in s:
         s = s.replace(link_needle, link_repl, 1)
-        print("Patched: ZXing iOS link + Xcode search paths")
+        print("Patched: ZXing iOS link + Xcode framework paths")
     elif "Linux/iOS build" in s:
         print("INFO: link block already patched")
     else:
         print("WARN: OpenCV link block not found; file layout may have changed")
+
+    # Fix older CI patch that overwrote all header paths (QRVersion.cpp: BitHacks.h not found).
+    if 'XCODE_ATTRIBUTE_HEADER_SEARCH_PATHS "${OpenCV_INCLUDE_DIRS_ABS}"' in s:
+        s = s.replace(
+            '            XCODE_ATTRIBUTE_HEADER_SEARCH_PATHS "${OpenCV_INCLUDE_DIRS_ABS}"\n',
+            "",
+        )
+        print("Patched: removed XCODE_ATTRIBUTE_HEADER_SEARCH_PATHS override")
 
     p.write_text(s, encoding="utf-8")
     print("Wrote", p)
