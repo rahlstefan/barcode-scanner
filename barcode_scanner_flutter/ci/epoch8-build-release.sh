@@ -20,28 +20,37 @@ cmake -S../../ -B_builds -GXcode \
     -DOpenCV_FRAMEWORK_DIR="${OpenCV_FRAMEWORK_DIR}"
 
 if [ -f _builds/ZXing.xcodeproj/project.pbxproj ]; then
-  sed -i "" "s/opencv_gapi//g" _builds/ZXing.xcodeproj/project.pbxproj
+  # Prebuilt opencv2.framework has no arm64-simulator slice; strip bogus module refs from Xcode project.
+  sed -i "" \
+    -e 's/opencv_gapi//g' \
+    -e 's/opencv_highgui//g' \
+    -e 's/opencv_videoio//g' \
+    -e 's/opencv_video//g' \
+    -e 's/opencv_ml//g' \
+    -e 's/opencv_stitching//g' \
+    -e 's/opencv_photo//g' \
+    -e 's/opencv_objdetect//g' \
+    _builds/ZXing.xcodeproj/project.pbxproj
 fi
 
-echo "========= Build the sdk for simulators"
+XC_OCV=(
+  "FRAMEWORK_SEARCH_PATHS=${OpenCV_FRAMEWORK_DIR}"
+  "HEADER_SEARCH_PATHS=${OpenCV_INCLUDE_DIRS}"
+  "OTHER_LDFLAGS=-F${OpenCV_FRAMEWORK_DIR} -framework opencv2"
+)
+
+echo "========= Build the sdk for iOS (device)"
 xcodebuild -project _builds/ZXing.xcodeproj build \
     -target ZXing \
     -parallelizeTargets \
     -configuration Release \
     -hideShellScriptEnvironment \
-    -sdk iphonesimulator \
-    -arch arm64
+    -sdk iphoneos \
+    "${XC_OCV[@]}"
 
-echo "========= Build the sdk for iOS"
-xcodebuild -project _builds/ZXing.xcodeproj build \
-    -target ZXing \
-    -parallelizeTargets \
-    -configuration Release \
-    -hideShellScriptEnvironment \
-    -sdk iphoneos
-
-echo "========= Create the xcframework"
+# Official opencv-4.x-ios-framework.zip: device arm64 + x86_64 simulator, not arm64-simulator.
+# GitHub macos-15 (Apple Silicon) CI: skip iphonesimulator arm64; unsigned IPA needs device only.
+echo "========= Create the xcframework (device slice)"
 xcodebuild -create-xcframework \
-    -framework ./_builds/core/Release-iphonesimulator/ZXing.framework \
     -framework ./_builds/core/Release-iphoneos/ZXing.framework \
     -output ZXingCpp.xcframework

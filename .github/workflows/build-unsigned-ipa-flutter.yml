@@ -171,7 +171,15 @@ jobs:
           link_repl = (
               'else()\n'
               '    # Linux/iOS build: opencv_interface from pkg-config or iOS framework\n'
-              '    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})'
+              '    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})\n'
+              '    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+              '        target_include_directories(ZXing PRIVATE "${OpenCV_INCLUDE_DIRS_ABS}")\n'
+              '        set_target_properties(ZXing PROPERTIES\n'
+              '            XCODE_ATTRIBUTE_FRAMEWORK_SEARCH_PATHS "${OpenCV_FRAMEWORK_DIR_ABS}"\n'
+              '            XCODE_ATTRIBUTE_HEADER_SEARCH_PATHS "${OpenCV_INCLUDE_DIRS_ABS}"\n'
+              '            XCODE_ATTRIBUTE_OTHER_LDFLAGS "-F${OpenCV_FRAMEWORK_DIR_ABS} -framework opencv2"\n'
+              '        )\n'
+              '    endif()'
           )
           if link_needle in s and 'Linux/iOS build' not in s:
               s = s.replace(link_needle, link_repl, 1)
@@ -191,7 +199,11 @@ jobs:
           chmod +x ../_epoch8_zxing_cpp/wrappers/ios/build-release.sh
 
           cd ../_epoch8_zxing_cpp/wrappers/ios
-          ./build-release.sh 2>&1 | tee "$EPOCH8_LOG"
+          if ! ./build-release.sh 2>&1 | tee "$EPOCH8_LOG"; then
+            echo '--- xcodebuild / clang errors (last 80 matches) ---'
+            grep -E 'error:|fatal error:|BUILD FAILED|ld: ' "$EPOCH8_LOG" | tail -n 80 || true
+            exit 65
+          fi
 
           test -d ../_epoch8_zxing_cpp/wrappers/ios/ZXingCpp.xcframework \
             || (echo 'ERROR: ZXingCpp.xcframework missing after build-release.sh'; exit 1)
