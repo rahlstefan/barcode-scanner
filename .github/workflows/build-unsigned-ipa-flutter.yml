@@ -203,6 +203,12 @@ jobs:
           BIN="ios/third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/ZXing"
           test -f "$BIN"
           nm "$BIN" | grep -E "readbarcodescrpt_samplegridv1|readbarcodescrpt_detector_v1_samplegridv1"
+          echo "--- ZXing dynamic deps (must not require embedded opencv2.framework) ---"
+          otool -L "$BIN" | tee /tmp/zxing-otool.txt
+          if grep -q 'opencv2.framework' /tmp/zxing-otool.txt; then
+            echo "ERROR: ZXing links opencv2 dynamically; static link required for App Store/sideload."
+            exit 1
+          fi
 
       - name: Patch BitMatrix.h OpenCV include (ObjC NO macro)
         run: |
@@ -236,7 +242,7 @@ jobs:
           set -o pipefail
           flutter build ios --release --no-codesign --verbose 2>&1 | tee build_ios.log
 
-      - name: Embed ZXing and OpenCV into Runner.app
+      - name: Embed ZXing into Runner.app (not static opencv2)
         run: |
           set -euo pipefail
           APP_PATH="build/ios/iphoneos/Runner.app"
@@ -244,11 +250,11 @@ jobs:
           test -d "${APP_PATH}"
           mkdir -p "${DEST}"
           rsync -a ios/third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework "${DEST}/"
-          rsync -a ios/third_party/opencv2.framework "${DEST}/"
+          rm -rf "${DEST}/opencv2.framework"
           echo "--- Runner.app/Frameworks ---"
           ls -la "${DEST}"
           test -f "${DEST}/ZXing.framework/ZXing"
-          test -f "${DEST}/opencv2.framework/opencv2"
+          test ! -d "${DEST}/opencv2.framework"
 
       - name: Show iOS build log tail on failure
         if: failure()
@@ -278,7 +284,7 @@ jobs:
           mkdir Payload
           cp -R "$APP_PATH" Payload/Runner.app
           test -f Payload/Runner.app/Frameworks/ZXing.framework/ZXing
-          test -f Payload/Runner.app/Frameworks/opencv2.framework/opencv2
+          test ! -d Payload/Runner.app/Frameworks/opencv2.framework
           # Sanity: model bundled?
           if [ -f Payload/Runner.app/Frameworks/App.framework/flutter_assets/assets/models/best_full_integer_quant.tflite ]; then
             echo "Model size: $(stat -f%z Payload/Runner.app/Frameworks/App.framework/flutter_assets/assets/models/best_full_integer_quant.tflite) bytes"

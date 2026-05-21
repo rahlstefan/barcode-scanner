@@ -70,6 +70,7 @@ post_install do |installer|
         config.build_settings['FRAMEWORK_SEARCH_PATHS'] = "#{config.build_settings['FRAMEWORK_SEARCH_PATHS']} \"#{third_party}\" \"#{zxing_slice}\""
         config.build_settings['GCC_PREFIX_HEADER'] = ''
         flags = config.build_settings['OTHER_LDFLAGS'] || '$(inherited)'
+        # opencv2: static — link into CRPTZXBridge only, never embed in Runner.app.
         %w[ZXing opencv2 CoreVideo].each do |fw|
           flag = "-framework #{fw}"
           flags = "#{flags} #{flag}" unless flags.include?(flag)
@@ -79,25 +80,24 @@ post_install do |installer|
     end
   end
 
-  # CocoaPods links ZXing/opencv2 but does not embed vendored xcframework slices into Runner.app.
+  # CocoaPods does not embed the ZXing xcframework slice into Runner.app.
+  # opencv2 is static — must NOT be copied into Frameworks/ (Sideloadly/installd rejects it).
   zxing_fw = File.expand_path('third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework', __dir__)
-  opencv_fw = File.expand_path('third_party/opencv2.framework', __dir__)
-  next unless File.directory?(zxing_fw) && File.directory?(opencv_fw)
+  next unless File.directory?(zxing_fw)
 
   installer.aggregate_targets.each do |aggregate_target|
     aggregate_target.user_project.native_targets.each do |native_target|
       next unless native_target.name == 'Runner'
-      next if native_target.build_phases.any? { |p| p.respond_to?(:name) && p.name == 'Embed CRPT Third Party Frameworks' }
+      next if native_target.build_phases.any? { |p| p.respond_to?(:name) && p.name == 'Embed ZXing Framework' }
 
-      phase = native_target.new_shell_script_build_phase('Embed CRPT Third Party Frameworks')
+      phase = native_target.new_shell_script_build_phase('Embed ZXing Framework')
       phase.shell_script = <<~SCRIPT
         set -e
         DEST="${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}"
         mkdir -p "${DEST}"
         rsync -a "#{zxing_fw}" "${DEST}/"
-        rsync -a "#{opencv_fw}" "${DEST}/"
-        echo "Embedded ZXing + opencv2 -> ${DEST}"
-        ls -la "${DEST}" | grep -E 'ZXing|opencv2' || true
+        rm -rf "${DEST}/opencv2.framework"
+        echo "Embedded ZXing.framework -> ${DEST}"
       SCRIPT
     end
     aggregate_target.user_project.save
