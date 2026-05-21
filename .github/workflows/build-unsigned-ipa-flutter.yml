@@ -106,56 +106,14 @@ jobs:
         run: |
           set -euo pipefail
           EPOCH8_LOG="$PWD/epoch8_build.log"
-          brew list opencv >/dev/null 2>&1 || brew install opencv
 
           rm -rf ../_epoch8_zxing_cpp
           git clone --depth 1 \
             --branch crpt-prod-fixed-mediapipe-10.30 \
             https://github.com/epoch8/zxing-cpp.git ../_epoch8_zxing_cpp
 
-          # Patch epoch8 CMake for iOS OpenCV resolution.
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path('../_epoch8_zxing_cpp/core/CMakeLists.txt')
-          src = p.read_text(encoding='utf-8')
-
-          src = src.replace(
-              'if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)',
-              'if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-              '    find_package(OpenCV REQUIRED COMPONENTS core imgproc)\n\n'
-              '    add_library(opencv_interface INTERFACE)\n'
-              '    target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})\n'
-              '    target_link_directories(opencv_interface INTERFACE ${OpenCV_LIBRARY_DIRS})\n'
-              '    target_link_libraries(opencv_interface INTERFACE ${OpenCV_LIBRARIES})\n'
-              '    target_compile_options(opencv_interface INTERFACE ${OpenCV_CFLAGS_OTHER})\n\n'
-              '    set(OpenCV_FOUND TRUE)\n'
-              '    set(OpenCV_LIBS opencv_interface)\n'
-              'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)',
-              1,
-          )
-
-          src = src.replace(
-              'target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})\n'
-              '    target_link_libraries(opencv_interface INTERFACE ${OpenCV_LIBRARIES})',
-              'target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})\n'
-              '    target_link_directories(opencv_interface INTERFACE ${OpenCV_LIBRARY_DIRS})\n'
-              '    target_link_libraries(opencv_interface INTERFACE ${OpenCV_LIBRARIES})',
-          )
-
-          # Defensive: strip explicit gapi mentions in this branch for iOS builds.
-          src = src.replace('opencv_gapi', '')
-
-          p.write_text(src, encoding='utf-8')
-          print('Patched', p)
-          PY
-
-          OPENCV_PREFIX="$(brew --prefix opencv)"
-          export OpenCV_DIR="$OPENCV_PREFIX/lib/cmake/opencv4"
-          export CMAKE_PREFIX_PATH="$OpenCV_DIR:$OPENCV_PREFIX:${CMAKE_PREFIX_PATH:-}"
-          test -f "$OpenCV_DIR/OpenCVConfig.cmake"
-          # Ensure wrappers/ios build script forwards OpenCV_DIR and removes
-          # opencv_gapi from generated Xcode project before xcodebuild.
+          # Ensure wrappers/ios build script builds iOS without desktop OpenCV
+          # linkage and removes opencv_gapi from generated Xcode project.
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -163,15 +121,14 @@ jobs:
           p = Path('../_epoch8_zxing_cpp/wrappers/ios/build-release.sh')
           s = p.read_text(encoding='utf-8')
 
-          # Inject OpenCV cache args right after CMAKE_SYSTEM_NAME=iOS line.
-          if '-DOpenCV_DIR="${OpenCV_DIR}"' not in s:
+          # Force non-desktop path in core/CMakeLists via existing condition.
+          if '-DBUILD_FOR_AARM=ON' not in s:
             nl = '\r\n' if '\r\n' in s else '\n'
             m = re.search(r'^\s*-DCMAKE_SYSTEM_NAME=iOS\s*\\\r?\n', s, flags=re.MULTILINE)
             if not m:
               raise RuntimeError('Failed to locate iOS cmake line in build-release.sh')
             insertion = (
-              '    -DOpenCV_DIR="${OpenCV_DIR}" \\' + nl +
-              '    -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}" \\' + nl
+              '    -DBUILD_FOR_AARM=ON \\' + nl
             )
             s = s[:m.end()] + insertion + s[m.end():]
 
