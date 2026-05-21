@@ -132,67 +132,8 @@ jobs:
           echo "OpenCV_INCLUDE_DIRS=$OpenCV_INCLUDE_DIRS"
           echo "OpenCV_FRAMEWORK_DIR=$OpenCV_FRAMEWORK_DIR"
 
-          # Patch epoch8 CMake for iOS OpenCV framework linkage.
-          # CRPT fork REQUIRES OpenCV (BitMatrix/DMDetector). Do NOT skip OpenCV on iOS.
-          python3 - <<'PY'
-          from pathlib import Path
-
-          p = Path('../_epoch8_zxing_cpp/core/CMakeLists.txt')
-          s = p.read_text(encoding='utf-8')
-
-          ios_block = (
-              'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-              '    get_filename_component(OpenCV_INCLUDE_DIRS_ABS "${OpenCV_INCLUDE_DIRS}" ABSOLUTE)\n'
-              '    get_filename_component(OpenCV_FRAMEWORK_DIR_ABS "${OpenCV_FRAMEWORK_DIR}" ABSOLUTE)\n'
-              '    add_library(opencv_interface INTERFACE)\n'
-              '    target_include_directories(opencv_interface INTERFACE "$<BUILD_INTERFACE:${OpenCV_INCLUDE_DIRS_ABS}>")\n'
-              '    target_link_options(opencv_interface INTERFACE "-F${OpenCV_FRAMEWORK_DIR_ABS}")\n'
-              '    target_link_libraries(opencv_interface INTERFACE "-framework opencv2")\n'
-              '    set(OpenCV_FOUND TRUE)\n'
-              '    set(OpenCV_LIBS opencv_interface)\n'
-              'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)\n'
-          )
-
-          # epoch8 uses `if` (not elseif) for the Linux pkg-config branch.
-          needle = 'if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)'
-          if needle not in s:
-              raise RuntimeError('epoch8 CMakeLists layout changed: cannot find Linux/Android OpenCV branch')
-          if 'CMAKE_SYSTEM_NAME STREQUAL "iOS"' not in s:
-              s = s.replace(needle, ios_block, 1)
-              print('Patched: iOS OpenCV + elseif Linux pkg-config branch')
-          else:
-              print('INFO: iOS OpenCV block already present')
-
-          link_needle = (
-              'else()\n'
-              '    # Linux build: use opencv_interface from pkg-config\n'
-              '    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})'
-          )
-          link_repl = (
-              'else()\n'
-              '    # Linux/iOS build: opencv_interface from pkg-config or iOS framework\n'
-              '    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})\n'
-              '    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-              '        target_include_directories(ZXing PRIVATE "${OpenCV_INCLUDE_DIRS_ABS}")\n'
-              '        set_target_properties(ZXing PROPERTIES\n'
-              '            XCODE_ATTRIBUTE_FRAMEWORK_SEARCH_PATHS "${OpenCV_FRAMEWORK_DIR_ABS}"\n'
-              '            XCODE_ATTRIBUTE_HEADER_SEARCH_PATHS "${OpenCV_INCLUDE_DIRS_ABS}"\n'
-              '            XCODE_ATTRIBUTE_OTHER_LDFLAGS "-F${OpenCV_FRAMEWORK_DIR_ABS} -framework opencv2"\n'
-              '        )\n'
-              '    endif()'
-          )
-          if link_needle in s and 'Linux/iOS build' not in s:
-              s = s.replace(link_needle, link_repl, 1)
-              print('Patched: OpenCV includes for iOS ZXing target')
-          elif 'Linux/iOS build' in s:
-              print('INFO: link block already patched')
-          else:
-              print('WARN: OpenCV link block not found; file layout may have changed')
-
-          s = s.replace('opencv_gapi', '')
-          p.write_text(s, encoding='utf-8')
-          print('Wrote', p)
-          PY
+          # Patch epoch8 CMake for iOS OpenCV (IMPORTED framework; CRPT requires OpenCV).
+          python3 ci/patch_epoch8_cmake_ios.py ../_epoch8_zxing_cpp/core/CMakeLists.txt
 
           # CI build script (kept in-repo — inline heredoc broke YAML indentation on line 196).
           cp ci/epoch8-build-release.sh ../_epoch8_zxing_cpp/wrappers/ios/build-release.sh
@@ -200,8 +141,10 @@ jobs:
 
           cd ../_epoch8_zxing_cpp/wrappers/ios
           if ! ./build-release.sh 2>&1 | tee "$EPOCH8_LOG"; then
-            echo '--- xcodebuild / clang errors (last 80 matches) ---'
-            grep -E 'error:|fatal error:|BUILD FAILED|ld: ' "$EPOCH8_LOG" | tail -n 80 || true
+            echo '--- epoch8_build.log (last 200 lines) ---'
+            tail -n 200 "$EPOCH8_LOG" || true
+            echo '--- errors only (last 80) ---'
+            grep -E 'error:|fatal error:|BUILD FAILED|ld: |not found|CMake Error' "$EPOCH8_LOG" | tail -n 80 || true
             exit 65
           fi
 
