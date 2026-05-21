@@ -64,6 +64,7 @@ post_install do |installer|
         opencv_headers = File.join(__dir__, 'third_party/opencv2.framework/Headers')
         config.build_settings['HEADER_SEARCH_PATHS'] ||= '$(inherited)'
         config.build_settings['HEADER_SEARCH_PATHS'] = "#{config.build_settings['HEADER_SEARCH_PATHS']} \"#{zxing_headers}\" \"#{opencv_headers}\""
+        config.build_settings['GCC_PREFIX_HEADER'] = ''
       end
     end
   end

@@ -66,6 +66,22 @@ find "${SRC_ROOT}" -type f -name '*.h' -print0 | while IFS= read -r -d '' h; do
 done
 echo "Header count in framework: $(find "${ZXING_HEADERS_DIR}" -maxdepth 1 -name '*.h' | wc -l | tr -d ' ')"
 
+BITMATRIX_H="${ZXING_HEADERS_DIR}/BitMatrix.h"
+if [ -f "${BITMATRIX_H}" ]; then
+  python3 - <<PY
+from pathlib import Path
+p = Path("${BITMATRIX_H}")
+text = p.read_text(encoding="utf-8")
+old = '#include "opencv2/opencv.hpp"'
+new = "#include <opencv2/core.hpp>\\n#include <opencv2/imgproc.hpp>"
+if old in text:
+    p.write_text(text.replace(old, new, 1), encoding="utf-8")
+    print("Patched BitMatrix.h: opencv.hpp -> core+imgproc (avoids ObjC NO macro)")
+else:
+    print("WARN: BitMatrix.h missing opencv.hpp include; left unchanged")
+PY
+fi
+
 echo "========= Create the xcframework (device slice)"
 xcodebuild -create-xcframework \
     -framework "${FRAMEWORK_DEVICE}" \

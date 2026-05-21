@@ -10,6 +10,8 @@ Pod::Spec.new do |s|
 
   s.platform         = :ios, '13.0'
   s.requires_arc     = true
+  # UIKit prefix header defines NO; must not be included before OpenCV (via BitMatrix.h).
+  s.prefix_header_file = false
 
   s.source_files     = 'CRPTZXBridge.h', 'CRPTZXBridge.mm'
   s.public_header_files = 'CRPTZXBridge.h'

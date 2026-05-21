@@ -115,7 +115,7 @@ jobs:
           path: |
             ios/third_party/ZXingCpp.xcframework
             ios/third_party/opencv2.framework
-          key: epoch8-ios-${{ hashFiles('barcode_scanner_flutter/ci/patch_epoch8_cmake_ios.py', 'barcode_scanner_flutter/ci/epoch8-build-release.sh') }}-opencv4.10.0-epoch8@crpt-prod-fixed-mediapipe-10.30-xcode16.4-fullheaders
+          key: epoch8-ios-${{ hashFiles('barcode_scanner_flutter/ci/patch_epoch8_cmake_ios.py', 'barcode_scanner_flutter/ci/epoch8-build-release.sh') }}-opencv4.10.0-epoch8@crpt-prod-fixed-mediapipe-10.30-xcode16.4-bitmatrix-core
 
       - name: Build epoch8 ZXingCpp.xcframework (CRPT)
         if: steps.epoch8-cache.outputs.cache-hit != 'true' || github.event.inputs.rebuild_epoch8 == 'true'
@@ -203,6 +203,26 @@ jobs:
           BIN="ios/third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/ZXing"
           test -f "$BIN"
           nm "$BIN" | grep -E "readbarcodescrpt_samplegridv1|readbarcodescrpt_detector_v1_samplegridv1"
+
+      - name: Patch BitMatrix.h OpenCV include (ObjC NO macro)
+        run: |
+          set -euo pipefail
+          BITMATRIX="ios/third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/Headers/BitMatrix.h"
+          test -f "$BITMATRIX"
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("ios/third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/Headers/BitMatrix.h")
+          text = p.read_text(encoding="utf-8")
+          old = '#include "opencv2/opencv.hpp"'
+          new = "#include <opencv2/core.hpp>\n#include <opencv2/imgproc.hpp>"
+          if old in text:
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+              print("Patched BitMatrix.h")
+          elif new.split("\n")[0] in text:
+              print("BitMatrix.h already patched")
+          else:
+              raise SystemExit("BitMatrix.h: unexpected opencv include")
+          PY
 
       - name: Pod install
         run: |
