@@ -126,34 +126,53 @@ jobs:
           export OpenCV_FRAMEWORK_DIR="$(dirname "$OPENCV_FRAMEWORK")"
 
           # Patch epoch8 CMake for iOS OpenCV framework linkage.
+          # CRPT fork REQUIRES OpenCV (BitMatrix/DMDetector). Do NOT skip OpenCV on iOS.
           python3 - <<'PY'
           from pathlib import Path
 
           p = Path('../_epoch8_zxing_cpp/core/CMakeLists.txt')
           s = p.read_text(encoding='utf-8')
 
-          s = s.replace(
-              'if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)',
-              'if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+          ios_block = (
+              'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
               '    add_library(opencv_interface INTERFACE)\n'
               '    target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})\n'
               '    target_link_options(opencv_interface INTERFACE "-F${OpenCV_FRAMEWORK_DIR}")\n'
-              '    target_link_libraries(opencv_interface INTERFACE "-framework opencv2")\n\n'
+              '    target_link_libraries(opencv_interface INTERFACE "-framework opencv2")\n'
               '    set(OpenCV_FOUND TRUE)\n'
               '    set(OpenCV_LIBS opencv_interface)\n'
-              'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)',
-              1,
           )
 
-          # Defensive: remove gapi token from this branch for iOS compatibility.
-          s = s.replace('opencv_gapi', '')
+          needle = 'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)'
+          if needle not in s:
+              raise RuntimeError('epoch8 CMakeLists layout changed: cannot find Linux/Android OpenCV branch')
+          if 'CMAKE_SYSTEM_NAME STREQUAL "iOS"' not in s:
+              s = s.replace(needle, ios_block + needle, 1)
+              print('Patched: inserted iOS OpenCV block before Linux pkg-config branch')
+          else:
+              print('INFO: iOS OpenCV block already present')
 
+          # iOS must see OpenCV headers when linking ZXing (not only WIN32).
+          link_needle = 'else()\n    # Linux/Windows build paths\n    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})'
+          link_repl = (
+              'else()\n'
+              '    # Linux/Windows/iOS build paths\n'
+              '    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+              '        target_include_directories(ZXing PUBLIC ${OpenCV_INCLUDE_DIRS})\n'
+              '    endif()\n'
+              '    target_link_libraries(ZXing PRIVATE Threads::Threads ${OpenCV_LIBS})'
+          )
+          if link_needle in s and 'Linux/Windows/iOS build paths' not in s:
+              s = s.replace(link_needle, link_repl, 1)
+              print('Patched: OpenCV includes for iOS ZXing target')
+
+          s = s.replace('opencv_gapi', '')
           p.write_text(s, encoding='utf-8')
-          print('Patched', p)
+          print('Wrote', p)
           PY
 
-          # Ensure wrappers/ios build script forwards OpenCV framework vars
-          # and removes opencv_gapi from generated Xcode project.
+          # Patch build-release.sh: pass OpenCV to CMake, arm64-only simulator (macOS CI = Apple Silicon),
+          # and produce ZXingCpp.xcframework (name expected by Podfile).
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -162,15 +181,27 @@ jobs:
           s = p.read_text(encoding='utf-8')
 
           if '-DOpenCV_FRAMEWORK_DIR="${OpenCV_FRAMEWORK_DIR}"' not in s:
-            nl = '\r\n' if '\r\n' in s else '\n'
-            m = re.search(r'^\s*-DCMAKE_SYSTEM_NAME=iOS\s*\\\r?\n', s, flags=re.MULTILINE)
-            if not m:
-              raise RuntimeError('Failed to locate iOS cmake line in build-release.sh')
-            insertion = (
-              '    -DOpenCV_INCLUDE_DIRS="${OpenCV_INCLUDE_DIRS}" \\' + nl +
-              '    -DOpenCV_FRAMEWORK_DIR="${OpenCV_FRAMEWORK_DIR}" \\' + nl
-            )
-            s = s[:m.end()] + insertion + s[m.end():]
+              nl = '\n'
+              m = re.search(r'^\s*-DCMAKE_SYSTEM_NAME=iOS\s*\\\s*$', s, flags=re.MULTILINE)
+              if not m:
+                  raise RuntimeError('Failed to locate iOS cmake line in build-release.sh')
+              insertion = (
+                  '    -DOpenCV_INCLUDE_DIRS="${OpenCV_INCLUDE_DIRS}" \\\n'
+                  '    -DOpenCV_FRAMEWORK_DIR="${OpenCV_FRAMEWORK_DIR}" \\\n'
+              )
+              s = s[:m.end()] + insertion + s[m.end():]
+
+          # GitHub macos-15 runners are arm64: x86_64 iphonesimulator often fails with xcodebuild exit 70.
+          s = s.replace(
+              '-sdk iphonesimulator -arch x86_64 -arch arm64',
+              '-sdk iphonesimulator -arch arm64',
+          )
+
+          s = s.replace(
+              '    -output ZXing.xcframework',
+              '    -output ZXingCpp.xcframework',
+          )
+          s = s.replace('rm -rf ZXing.xcframework', 'rm -rf ZXingCpp.xcframework')
 
           inject_marker = 'echo ========= Build the sdk for simulators\n'
           inject_block = (
@@ -179,7 +210,8 @@ jobs:
               'fi\n\n'
               'echo ========= Build the sdk for simulators\n'
           )
-          s = s.replace(inject_marker, inject_block, 1)
+          if inject_marker in s and 'opencv_gapi//g' not in s.split(inject_marker)[0][-400:]:
+              s = s.replace(inject_marker, inject_block, 1)
 
           p.write_text(s, encoding='utf-8')
           print('Patched', p)
@@ -188,10 +220,15 @@ jobs:
           cd ../_epoch8_zxing_cpp/wrappers/ios
           ./build-release.sh 2>&1 | tee "$EPOCH8_LOG"
 
+          test -d ../_epoch8_zxing_cpp/wrappers/ios/ZXingCpp.xcframework \
+            || (echo 'ERROR: ZXingCpp.xcframework missing after build-release.sh'; exit 1)
+
           cd ../../../barcode_scanner_flutter
           rm -rf ios/third_party/ZXingCpp.xcframework
           cp -R ../_epoch8_zxing_cpp/wrappers/ios/ZXingCpp.xcframework ios/third_party/ZXingCpp.xcframework
-          find ios/third_party/ZXingCpp.xcframework -maxdepth 2 -type d -print
+          rm -rf ios/third_party/opencv2.framework
+          cp -R "$OPENCV_FRAMEWORK" ios/third_party/opencv2.framework
+          find ios/third_party -maxdepth 2 -type d -print
 
       - name: Show epoch8 build log tail on failure
         if: failure()

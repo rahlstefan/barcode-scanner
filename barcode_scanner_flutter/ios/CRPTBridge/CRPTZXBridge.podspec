@@ -19,4 +19,10 @@ Pod::Spec.new do |s|
     'CLANG_CXX_LANGUAGE_STANDARD' => 'gnu++17',
     'CLANG_CXX_LIBRARY' => 'libc++'
   }
+
+  # ZXing (CRPT) is built against opencv2; Runner must link it when using vendored ZXingCpp.
+  s.user_target_xcconfig = {
+    'OTHER_LDFLAGS' => '$(inherited) -framework opencv2',
+    'FRAMEWORK_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../third_party"'
+  }
 end
