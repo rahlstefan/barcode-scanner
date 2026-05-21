@@ -56,6 +56,16 @@ if [ -z "${FRAMEWORK_DEVICE}" ] || [ ! -d "${FRAMEWORK_DEVICE}" ]; then
 fi
 echo "Using device framework: ${FRAMEWORK_DEVICE}"
 
+# BUILD_APPLE_FRAMEWORK only copies CMake PUBLIC_HEADERS; Result.h needs DetectorResult.h,
+# BitMatrix.h, Matrix.h, etc. Flatten all core/src headers into the framework bundle.
+echo "========= Sync ZXing headers into framework (API closure for CRPTZXBridge)"
+ZXING_HEADERS_DIR="${FRAMEWORK_DEVICE}/Headers"
+SRC_ROOT="$(cd ../../core/src && pwd)"
+find "${SRC_ROOT}" -type f -name '*.h' -print0 | while IFS= read -r -d '' h; do
+  cp -f "${h}" "${ZXING_HEADERS_DIR}/$(basename "${h}")"
+done
+echo "Header count in framework: $(find "${ZXING_HEADERS_DIR}" -maxdepth 1 -name '*.h' | wc -l | tr -d ' ')"
+
 echo "========= Create the xcframework (device slice)"
 xcodebuild -create-xcframework \
     -framework "${FRAMEWORK_DEVICE}" \

@@ -61,8 +61,9 @@ post_install do |installer|
 
       if target.name == 'CRPTZXBridge'
         zxing_headers = File.join(__dir__, 'third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/Headers')
+        opencv_headers = File.join(__dir__, 'third_party/opencv2.framework/Headers')
         config.build_settings['HEADER_SEARCH_PATHS'] ||= '$(inherited)'
-        config.build_settings['HEADER_SEARCH_PATHS'] = "#{config.build_settings['HEADER_SEARCH_PATHS']} \"#{zxing_headers}\""
+        config.build_settings['HEADER_SEARCH_PATHS'] = "#{config.build_settings['HEADER_SEARCH_PATHS']} \"#{zxing_headers}\" \"#{opencv_headers}\""
       end
     end
   end

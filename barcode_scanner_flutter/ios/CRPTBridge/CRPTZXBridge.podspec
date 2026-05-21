@@ -19,7 +19,7 @@ Pod::Spec.new do |s|
     'CLANG_CXX_LANGUAGE_STANDARD' => 'gnu++17',
     'CLANG_CXX_LIBRARY' => 'libc++',
     # Device-only ZXingCpp slice from CI (ios-arm64).
-    'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/Headers"',
+    'HEADER_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/Headers" "${PODS_ROOT}/../third_party/opencv2.framework/Headers"',
     'FRAMEWORK_SEARCH_PATHS' => '$(inherited) "${PODS_ROOT}/../third_party" "${PODS_ROOT}/../third_party/ZXingCpp.xcframework/ios-arm64"'
   }
 
