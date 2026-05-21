@@ -105,6 +105,7 @@ jobs:
       - name: Build epoch8 ZXingCpp.xcframework (CRPT)
         run: |
           set -euo pipefail
+          EPOCH8_LOG="$PWD/epoch8_build.log"
           brew list opencv >/dev/null 2>&1 || brew install opencv
 
           rm -rf ../_epoch8_zxing_cpp
@@ -150,8 +151,35 @@ jobs:
           PY
 
           export OpenCV_DIR="$(brew --prefix opencv)/lib/cmake/opencv4"
+          # Ensure wrappers/ios build script forwards OpenCV_DIR and removes
+          # opencv_gapi from generated Xcode project before xcodebuild.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('../_epoch8_zxing_cpp/wrappers/ios/build-release.sh')
+          s = p.read_text(encoding='utf-8')
+
+          s = s.replace(
+              'cmake -S../../ -B_builds -GXcode \\\n+    -DCMAKE_SYSTEM_NAME=iOS \\\n+',
+              'cmake -S../../ -B_builds -GXcode \\\n+    -DCMAKE_SYSTEM_NAME=iOS \\\n+    -DOpenCV_DIR="${OpenCV_DIR}" \\\n+',
+              1,
+          )
+
+          inject_marker = 'echo ========= Build the sdk for simulators\n'
+          inject_block = (
+              'if [ -f _builds/ZXing.xcodeproj/project.pbxproj ]; then\n'
+              '  sed -i "" "s/opencv_gapi//g" _builds/ZXing.xcodeproj/project.pbxproj\n'
+              'fi\n\n'
+              'echo ========= Build the sdk for simulators\n'
+          )
+          s = s.replace(inject_marker, inject_block, 1)
+
+          p.write_text(s, encoding='utf-8')
+          print('Patched', p)
+          PY
+
           cd ../_epoch8_zxing_cpp/wrappers/ios
-          ./build-release.sh 2>&1 | tee ../../_epoch8_build.log
+          ./build-release.sh 2>&1 | tee "$EPOCH8_LOG"
 
           cd ../../../barcode_scanner_flutter
           rm -rf ios/third_party/ZXingCpp.xcframework
@@ -162,14 +190,14 @@ jobs:
         if: failure()
         run: |
           echo '--- Last 250 lines of _epoch8_build.log ---'
-          tail -n 250 ../_epoch8_build.log || true
+          tail -n 250 epoch8_build.log || true
 
       - name: Upload epoch8 build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: epoch8-build-log
-          path: ../_epoch8_build.log
+          path: barcode_scanner_flutter/epoch8_build.log
           if-no-files-found: ignore
           retention-days: 14
 
