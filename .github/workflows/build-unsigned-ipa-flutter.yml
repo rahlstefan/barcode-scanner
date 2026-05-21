@@ -164,14 +164,16 @@ jobs:
           s = p.read_text(encoding='utf-8')
 
           # Inject OpenCV cache args right after CMAKE_SYSTEM_NAME=iOS line.
-          s, n = re.subn(
-            r'(\n\s*-DCMAKE_SYSTEM_NAME=iOS \\\\n)',
-            r'\1    -DOpenCV_DIR="${OpenCV_DIR}" \\\n    -DCMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH}" \\\n',
-            s,
-            count=1,
-          )
-          if n == 0:
-            raise RuntimeError('Failed to inject OpenCV args into build-release.sh')
+          if '-DOpenCV_DIR="${OpenCV_DIR}"' not in s:
+            nl = '\r\n' if '\r\n' in s else '\n'
+            m = re.search(r'^\s*-DCMAKE_SYSTEM_NAME=iOS\s*\\\r?\n', s, flags=re.MULTILINE)
+            if not m:
+              raise RuntimeError('Failed to locate iOS cmake line in build-release.sh')
+            insertion = (
+              f'    -DOpenCV_DIR="${{OpenCV_DIR}}" \\{nl}'
+              f'    -DCMAKE_PREFIX_PATH="${{CMAKE_PREFIX_PATH}}" \\{nl}'
+            )
+            s = s[:m.end()] + insertion + s[m.end():]
 
           inject_marker = 'echo ========= Build the sdk for simulators\n'
           inject_block = (
