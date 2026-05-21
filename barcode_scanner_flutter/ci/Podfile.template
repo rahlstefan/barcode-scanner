@@ -58,6 +58,12 @@ post_install do |installer|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
       # Allow non-modular includes for TensorFlowLiteSwift's C headers.
       config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+
+      if target.name == 'CRPTZXBridge'
+        zxing_headers = File.join(__dir__, 'third_party/ZXingCpp.xcframework/ios-arm64/ZXing.framework/Headers')
+        config.build_settings['HEADER_SEARCH_PATHS'] ||= '$(inherited)'
+        config.build_settings['HEADER_SEARCH_PATHS'] = "#{config.build_settings['HEADER_SEARCH_PATHS']} \"#{zxing_headers}\""
+      end
     end
   end
 end

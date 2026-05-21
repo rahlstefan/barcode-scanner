@@ -3,11 +3,12 @@
 #include <algorithm>
 #include <string>
 
-#include "ZXing/BarcodeFormat.h"
-#include "ZXing/DecodeHints.h"
-#include "ZXing/ImageView.h"
-#include "ZXing/Point.h"
-#include "ZXing/ReadBarcode.h"
+// ZXingCpp.xcframework exposes public headers flat under ZXing.framework/Headers/
+#include "BarcodeFormat.h"
+#include "DecodeHints.h"
+#include "ImageView.h"
+#include "Point.h"
+#include "ReadBarcode.h"
 
 @implementation CRPTZXBridge
 
