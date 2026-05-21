@@ -44,6 +44,7 @@ class DetectionStream {
           score: (m['score'] as num).toDouble(),
           classId: (m['cls'] as num).toInt(),
           frameId: (m['fid'] as num).toInt(),
+          text: m['text'] as String?,
         );
       }).toList();
     }).asBroadcastStream();

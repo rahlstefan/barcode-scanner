@@ -30,6 +30,7 @@ class Detection {
   final double score;
   final int classId;
   final int frameId; // monotonic frame counter when produced
+  final String? text; // decoded barcode content (ZXing), null when not yet decoded
 
   const Detection({
     required this.x1,
@@ -39,6 +40,7 @@ class Detection {
     required this.score,
     required this.classId,
     required this.frameId,
+    this.text,
   });
 
   double get cx => (x1 + x2) * 0.5;
@@ -67,6 +69,7 @@ class SmoothedDetection {
   final double score;
   final int classId;
   final int trackId;
+  final String? text; // best decoded barcode text seen for this track
 
   const SmoothedDetection({
     required this.x1,
@@ -76,5 +79,6 @@ class SmoothedDetection {
     required this.score,
     required this.classId,
     required this.trackId,
+    this.text,
   });
 }

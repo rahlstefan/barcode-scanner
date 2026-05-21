@@ -47,16 +47,29 @@ class BBoxPainter extends CustomPainter {
 
       final tp = TextPainter(
         text: TextSpan(
-          text:
-              '${detectionClassLabel(d.classId)} ${(d.score * 100).toStringAsFixed(0)}%',
-          style: const TextStyle(
-              color: Colors.white,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              backgroundColor: Color(0xCC000000)),
+          children: [
+            TextSpan(
+              text:
+                  '${detectionClassLabel(d.classId)} ${(d.score * 100).toStringAsFixed(0)}%',
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  backgroundColor: Color(0xCC000000)),
+            ),
+            if (d.text != null)
+              TextSpan(
+                text: '\n${d.text}',
+                style: const TextStyle(
+                    color: Color(0xFFFFFFCC),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w400,
+                    backgroundColor: Color(0xCC000000)),
+              ),
+          ],
         ),
         textDirection: TextDirection.ltr,
-      )..layout();
+      )..layout(maxWidth: r.width - 8);
       tp.paint(canvas, r.topLeft + const Offset(4, 4));
     }
   }

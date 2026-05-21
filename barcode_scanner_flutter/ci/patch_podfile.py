@@ -51,6 +51,19 @@ if "TensorFlowLiteSwift" not in src:
         sys.exit(2)
     src = new_src
 
+# 3. Add ZXingObjC pod inside Runner target.
+if "ZXingObjC" not in src:
+    new_src, n = re.subn(
+        r"(pod 'TensorFlowLiteSwift'[^\n]*\n)",
+        r"\1  pod 'ZXingObjC', '~> 3.6'\n",
+        src,
+        count=1,
+    )
+    if n == 0:
+        sys.stderr.write("WARNING: could not add ZXingObjC pod automatically\n")
+    else:
+        src = new_src
+
 if src != original:
     PODFILE.write_text(src, encoding="utf-8")
 

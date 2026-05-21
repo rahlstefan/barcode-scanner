@@ -3,6 +3,7 @@ import Flutter
 import AVFoundation
 import TensorFlowLite
 import Accelerate
+import ZXingObjC
 
 // =====================================================================
 //  Barcode Scanner — native iOS layer
@@ -119,6 +120,7 @@ final class DLog {
   private var currentModelId: String = "multiclass_tail"
   private var confidenceThreshold: Float = 0.25
   private weak var lastCameraView: CameraPreviewView?
+  private let barcodeDecoder = BarcodeDecoder()
   private var perfLatenciesMs: [Double] = []
   private var perfFrames: Int = 0
   private var perfDetections: Int = 0
@@ -243,8 +245,32 @@ final class DLog {
       return
     }
     let t0 = CACurrentMediaTime()
-    let dets = det.run(pixelBuffer: pixelBuffer, frameId: frameId,
-                       threshold: confidenceThreshold)
+    let rawDets = det.run(pixelBuffer: pixelBuffer, frameId: frameId,
+                          threshold: confidenceThreshold)
+
+    // ZXing decode: for each YOLO detection, crop the frame and decode the barcode.
+    // Only attempt on frames where YOLO found something (saves CPU on empty frames).
+    var dets = rawDets
+    if !rawDets.isEmpty {
+      dets = rawDets.map { d in
+        let x1  = (d["x1"] as? Float) ?? 0
+        let y1  = (d["y1"] as? Float) ?? 0
+        let x2  = (d["x2"] as? Float) ?? 1
+        let y2  = (d["y2"] as? Float) ?? 1
+        let cls = (d["cls"] as? Int) ?? 0
+        if let text = barcodeDecoder.decode(
+          pixelBuffer: pixelBuffer,
+          x1: x1, y1: y1, x2: x2, y2: y2,
+          cls: cls
+        ) {
+          var updated = d
+          updated["text"] = text
+          return updated
+        }
+        return d
+      }
+    }
+
     let dt = (CACurrentMediaTime() - t0) * 1000.0
     perfFrames += 1
     perfDetections += dets.count
@@ -503,6 +529,119 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 //              layout per row: x1, y1, x2, y2, score, cls (coords 0..1)
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// MARK: - Barcode Decoder (ZXingObjC)
+//
+//  Pipeline: YOLO bbox (normalized 0..1 in center-square of camera frame)
+//            → crop BGRA pixel buffer → ZXingObjC format-specific reader
+//
+//  Classes from YOLO:  0 = datamatrix, 1 = code128, 2 = pdf417
+// ---------------------------------------------------------------------
+
+private final class BarcodeDecoder {
+  // Format-specific readers — more reliable than ZXMultiFormatReader + hints
+  // because YOLO has already told us the barcode class.
+  private let dmReader      = ZXDataMatrixReader()
+  private let code128Reader = ZXCode128Reader()
+  private let pdf417Reader  = ZXPDF417Reader()
+
+  private let dmHints: ZXDecodeHints = {
+    let h = ZXDecodeHints.hints() as! ZXDecodeHints
+    h.tryHarder = true
+    return h
+  }()
+
+  /// Decode the barcode in the YOLO-normalized bbox from a BGRA pixel buffer.
+  /// Returns decoded text, or nil when ZXing cannot find a barcode.
+  func decode(
+    pixelBuffer: CVPixelBuffer,
+    x1: Float, y1: Float, x2: Float, y2: Float,
+    cls: Int
+  ) -> String? {
+    guard let cgImage = cropToCGImage(pixelBuffer, x1: x1, y1: y1, x2: x2, y2: y2) else {
+      return nil
+    }
+    guard let source = ZXCGImageLuminanceSource(cgImage: cgImage) else { return nil }
+    let bitmap = ZXBinaryBitmap(binarizer: ZXHybridBinarizer(source: source))
+
+    var zxError: NSError?
+    let result: ZXResult?
+    switch cls {
+    case 0:  // datamatrix
+      result = dmReader.decode(bitmap, hints: dmHints, error: &zxError)
+    case 1:  // code128
+      result = code128Reader.decode(bitmap, hints: nil, error: &zxError)
+    case 2:  // pdf417
+      result = pdf417Reader.decode(bitmap, hints: nil, error: &zxError)
+    default:
+      return nil
+    }
+    return result?.text
+  }
+
+  /// Extracts the bbox crop as a BGRA CGImage.
+  /// YOLO normalized coords (0..1) map to the center-square crop of the camera frame.
+  private func cropToCGImage(
+    _ pb: CVPixelBuffer,
+    x1: Float, y1: Float, x2: Float, y2: Float
+  ) -> CGImage? {
+    CVPixelBufferLockBaseAddress(pb, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+
+    let pbW    = CVPixelBufferGetWidth(pb)
+    let pbH    = CVPixelBufferGetHeight(pb)
+    let stride = CVPixelBufferGetBytesPerRow(pb)
+    guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
+
+    // Same center-square crop geometry as preprocess() in YoloDetector.
+    let side = min(pbW, pbH)
+    let xOff = (pbW - side) / 2
+    let yOff = (pbH - side) / 2
+
+    var cx1 = xOff + Int((x1 * Float(side)).rounded())
+    var cy1 = yOff + Int((y1 * Float(side)).rounded())
+    var cx2 = xOff + Int((x2 * Float(side)).rounded())
+    var cy2 = yOff + Int((y2 * Float(side)).rounded())
+    cx1 = max(0, min(cx1, pbW - 1))
+    cy1 = max(0, min(cy1, pbH - 1))
+    cx2 = max(cx1 + 1, min(cx2, pbW))
+    cy2 = max(cy1 + 1, min(cy2, pbH))
+
+    let cropW = cx2 - cx1
+    let cropH = cy2 - cy1
+
+    // Copy BGRA rows into a CFData-backed contiguous buffer.
+    var bytes = [UInt8](repeating: 0, count: cropW * cropH * 4)
+    bytes.withUnsafeMutableBytes { dst in
+      let dstBase = dst.baseAddress!
+      for row in 0..<cropH {
+        memcpy(
+          dstBase.advanced(by: row * cropW * 4),
+          base.advanced(by: (cy1 + row) * stride + cx1 * 4),
+          cropW * 4
+        )
+      }
+    }
+    let cfData = Data(bytes) as CFData
+    guard let provider = CGDataProvider(data: cfData) else { return nil }
+
+    // BGRA CGImage — ZXCGImageLuminanceSource converts to grayscale internally.
+    return CGImage(
+      width: cropW, height: cropH,
+      bitsPerComponent: 8, bitsPerPixel: 32,
+      bytesPerRow: cropW * 4,
+      space: CGColorSpaceCreateDeviceRGB(),
+      bitmapInfo: CGBitmapInfo(rawValue:
+        CGBitmapInfo.byteOrder32Little.rawValue |
+        CGImageAlphaInfo.noneSkipFirst.rawValue),
+      provider: provider,
+      decode: nil, shouldInterpolate: false,
+      intent: .defaultIntent
+    )
+  }
+}
+
+// ---------------------------------------------------------------------
 enum YoloError: Error { case modelNotFound, allocFailed, badTensor }
 
 final class YoloDetector {

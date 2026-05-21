@@ -36,6 +36,7 @@ target 'Runner' do
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 
   pod 'TensorFlowLiteSwift', '~> 2.14.0'
+  pod 'ZXingObjC', '~> 3.6'
 
   target 'RunnerTests' do
     inherit! :search_paths

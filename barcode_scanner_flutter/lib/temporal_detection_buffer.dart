@@ -22,6 +22,8 @@ class _Track {
   int lastFrameId;
   int lastTimestampMs;
   int classId;
+  /// Best decoded barcode text seen for this track; persists once found.
+  String? bestText;
 
   _Track({
     required this.id,
@@ -33,7 +35,8 @@ class _Track {
         sy2 = seed.y2,
         sScore = seed.score,
         lastFrameId = seed.frameId,
-        classId = seed.classId {
+        classId = seed.classId,
+        bestText = seed.text {
     recent.add(seed);
   }
 }
@@ -93,6 +96,7 @@ class TemporalDetectionBuffer {
               score: d.score,
               classId: d.classId,
               frameId: fid,
+              text: d.text,
             ))
         .toList();
 
@@ -138,6 +142,8 @@ class TemporalDetectionBuffer {
         t.sScore = t.sScore + emaAlpha * (m.score - t.sScore);
         t.lastFrameId = fid;
         t.lastTimestampMs = nowMs;
+        // Persist decoded text — once decoded, keep it even if later frames fail.
+        if (m.text != null) t.bestText = m.text;
       }
     }
 
@@ -172,6 +178,7 @@ class TemporalDetectionBuffer {
           t.sScore = s.score;
           t.lastFrameId = fid;
           t.lastTimestampMs = nowMs;
+          if (s.text != null) t.bestText = s.text;
           suppress = true;
           break;
         }
@@ -213,6 +220,7 @@ class TemporalDetectionBuffer {
           score: t.sScore,
           classId: t.classId,
           trackId: t.id,
+          text: t.bestText,
         ));
       }
     }
