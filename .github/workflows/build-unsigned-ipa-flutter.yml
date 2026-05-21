@@ -112,53 +112,74 @@ jobs:
             --branch crpt-prod-fixed-mediapipe-10.30 \
             https://github.com/epoch8/zxing-cpp.git ../_epoch8_zxing_cpp
 
-          # Patch core/CMakeLists.txt to skip OpenCV for iOS builds.
-          # The epoch8 fork's CMakeLists has two OpenCV paths:
-          #   - Linux  (BUILD_FOR_AARM unset): uses pkg-config — unavailable on iOS.
-          #   - Android (BUILD_FOR_AARM=ON): uses find_package with NO_DEFAULT_PATH
-          #     and OpenCV_DIR — also fails on iOS because there is no iOS OpenCV.
-          # The fix adds an iOS-specific branch that sets OpenCV_LIBS="" and skips
-          # the find_package call, so the Xcode build proceeds without OpenCV.
+          rm -rf ../_opencv_ios
+          mkdir -p ../_opencv_ios
+          curl -L --retry 3 --retry-delay 2 \
+            -o ../_opencv_ios/opencv-ios.zip \
+            https://github.com/opencv/opencv/releases/download/4.10.0/opencv-4.10.0-ios-framework.zip
+          unzip -q ../_opencv_ios/opencv-ios.zip -d ../_opencv_ios
+
+          OPENCV_FRAMEWORK="$(find ../_opencv_ios -type d -name opencv2.framework | head -n 1)"
+          test -n "$OPENCV_FRAMEWORK"
+          test -d "$OPENCV_FRAMEWORK/Headers"
+          export OpenCV_INCLUDE_DIRS="$OPENCV_FRAMEWORK/Headers"
+          export OpenCV_FRAMEWORK_DIR="$(dirname "$OPENCV_FRAMEWORK")"
+
+          # Patch epoch8 CMake for iOS OpenCV framework linkage.
           python3 - <<'PY'
           from pathlib import Path
 
           p = Path('../_epoch8_zxing_cpp/core/CMakeLists.txt')
           s = p.read_text(encoding='utf-8')
 
-          # 1. Prepend an iOS guard before the Linux/Android OpenCV detection block.
-          OLD_TOP = 'if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)\n'
-          NEW_TOP = (
-              'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-              '    # iOS build: OpenCV is not required; skip detection entirely.\n'
-              '    set(OpenCV_LIBS "")\n'
-              'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)\n'
+          s = s.replace(
+              'if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)',
+              'if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+              '    add_library(opencv_interface INTERFACE)\n'
+              '    target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})\n'
+              '    target_link_options(opencv_interface INTERFACE "-F${OpenCV_FRAMEWORK_DIR}")\n'
+              '    target_link_libraries(opencv_interface INTERFACE "-framework opencv2")\n\n'
+              '    set(OpenCV_FOUND TRUE)\n'
+              '    set(OpenCV_LIBS opencv_interface)\n'
+              'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)',
+              1,
           )
-          ALREADY_PATCHED_TOP = 'set(OpenCV_LIBS "")\nelseif(NOT DEFINED BUILD_FOR_AARM'
-          if OLD_TOP in s:
-              s = s.replace(OLD_TOP, NEW_TOP, 1)
-              print('Patched: added iOS guard before Linux/Android OpenCV detection block')
-          elif ALREADY_PATCHED_TOP in s:
-              print('INFO: iOS guard already present in OpenCV detection block; skipping')
-          else:
-              print('WARN: top OpenCV detection block not found; file structure may have changed')
 
-          # 2. Guard the Android find_package(OpenCV REQUIRED) call against iOS.
-          OLD_FP = (
-              'if(DEFINED BUILD_FOR_AARM AND BUILD_FOR_AARM)\n'
-              '    find_package(OpenCV REQUIRED'
+          # Defensive: remove gapi token from this branch for iOS compatibility.
+          s = s.replace('opencv_gapi', '')
+
+          p.write_text(s, encoding='utf-8')
+          print('Patched', p)
+          PY
+
+          # Ensure wrappers/ios build script forwards OpenCV framework vars
+          # and removes opencv_gapi from generated Xcode project.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path('../_epoch8_zxing_cpp/wrappers/ios/build-release.sh')
+          s = p.read_text(encoding='utf-8')
+
+          if '-DOpenCV_FRAMEWORK_DIR="${OpenCV_FRAMEWORK_DIR}"' not in s:
+            nl = '\r\n' if '\r\n' in s else '\n'
+            m = re.search(r'^\s*-DCMAKE_SYSTEM_NAME=iOS\s*\\\r?\n', s, flags=re.MULTILINE)
+            if not m:
+              raise RuntimeError('Failed to locate iOS cmake line in build-release.sh')
+            insertion = (
+              '    -DOpenCV_INCLUDE_DIRS="${OpenCV_INCLUDE_DIRS}" \\' + nl +
+              '    -DOpenCV_FRAMEWORK_DIR="${OpenCV_FRAMEWORK_DIR}" \\' + nl
+            )
+            s = s[:m.end()] + insertion + s[m.end():]
+
+          inject_marker = 'echo ========= Build the sdk for simulators\n'
+          inject_block = (
+              'if [ -f _builds/ZXing.xcodeproj/project.pbxproj ]; then\n'
+              '  sed -i "" "s/opencv_gapi//g" _builds/ZXing.xcodeproj/project.pbxproj\n'
+              'fi\n\n'
+              'echo ========= Build the sdk for simulators\n'
           )
-          NEW_FP = (
-              'if(DEFINED BUILD_FOR_AARM AND BUILD_FOR_AARM AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
-              '    find_package(OpenCV REQUIRED'
-          )
-          ALREADY_PATCHED_FP = 'AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    find_package(OpenCV REQUIRED'
-          if OLD_FP in s:
-              s = s.replace(OLD_FP, NEW_FP, 1)
-              print('Patched: guarded Android find_package(OpenCV REQUIRED) against iOS')
-          elif ALREADY_PATCHED_FP in s:
-              print('INFO: Android find_package(OpenCV) already guarded against iOS; skipping')
-          else:
-              print('WARN: Android find_package(OpenCV REQUIRED) block not found; file structure may have changed')
+          s = s.replace(inject_marker, inject_block, 1)
 
           p.write_text(s, encoding='utf-8')
           print('Patched', p)
