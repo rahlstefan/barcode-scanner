@@ -112,27 +112,137 @@ jobs:
             --branch crpt-prod-fixed-mediapipe-10.30 \
             https://github.com/epoch8/zxing-cpp.git ../_epoch8_zxing_cpp
 
-          # Homebrew OpenCV on macOS runners does not provide an iOS-linkable
-          # opencv_gapi for this framework build. Remove that module from
-          # link-lists in the cloned dependency before generating Xcode project.
-          GAPI_FILES=$(grep -RIl "opencv_gapi" ../_epoch8_zxing_cpp || true)
-          if [ -n "$GAPI_FILES" ]; then
-            echo "Patching opencv_gapi references:"
-            echo "$GAPI_FILES"
-            while IFS= read -r f; do
-              [ -z "$f" ] && continue
-              sed -i '' -E "s/[[:space:]]opencv_gapi([[:space:]\);\"]|$)/\1/g" "$f"
-            done <<< "$GAPI_FILES"
-          fi
+            # Patch epoch8 CMake for iOS: avoid pkg-config OpenCV branch,
+            # resolve OpenCV via CMake (core+imgproc only), and pass library dirs.
+            python3 - <<'PY'
+      from pathlib import Path
+      import re
+
+      p = Path('../_epoch8_zxing_cpp/core/CMakeLists.txt')
+      src = p.read_text(encoding='utf-8')
+
+      needle = """if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)
+        # Linux build: use pkg-config for OpenCV
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(OpenCV QUIET opencv4)
+        if(NOT OpenCV_FOUND)
+          pkg_check_modules(OpenCV REQUIRED opencv)
+        endif()
+
+        # Prefer the locally built static OpenCV archives when available.
+        # This avoids accidentally resolving against stray system/shared OpenCV
+        # runtimes with a different ABI version at load time.
+        set(OPENCV_LOCAL_CORE_A \"/usr/local/lib/libopencv_core.a\")
+        set(OPENCV_LOCAL_IMGPROC_A \"/usr/local/lib/libopencv_imgproc.a\")
+        if(EXISTS \"${OPENCV_LOCAL_CORE_A}\" AND EXISTS \"${OPENCV_LOCAL_IMGPROC_A}\")
+          message(STATUS \"Using explicit local static OpenCV archives for ZXing\")
+          set(OpenCV_LIBRARIES
+            \"${OPENCV_LOCAL_IMGPROC_A}\"
+            \"${OPENCV_LOCAL_CORE_A}\"
+          )
+        endif()
+
+        # Create OpenCV interface target for compatibility
+        add_library(opencv_interface INTERFACE)
+        target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})
+        target_link_libraries(opencv_interface INTERFACE ${OpenCV_LIBRARIES})
+        target_compile_options(opencv_interface INTERFACE ${OpenCV_CFLAGS_OTHER})
+
+        # Set variables for later use
+        set(OpenCV_FOUND TRUE)
+        set(OpenCV_LIBS opencv_interface)
+      else()
+        # Android build: use CMake configuration
+        set(OpenCV_FIND_VERSION \"4.0\")
+        set(OpenCV_SHARED ON)  # Force using shared libraries (.so) instead of static (.a)
+        set(BUILD_SHARED_LIBS ON)  # Force shared libraries globally
+      endif()"""
+
+      replacement = """if(APPLE AND CMAKE_SYSTEM_NAME STREQUAL \"iOS\")
+        # iOS build: use CMake OpenCV config and restrict to modules needed by CRPT paths.
+        find_package(OpenCV REQUIRED COMPONENTS core imgproc PATHS ${OpenCV_DIR} NO_DEFAULT_PATH)
+
+        add_library(opencv_interface INTERFACE)
+        target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})
+        target_link_directories(opencv_interface INTERFACE ${OpenCV_LIBRARY_DIRS})
+        target_link_libraries(opencv_interface INTERFACE ${OpenCV_LIBRARIES})
+        target_compile_options(opencv_interface INTERFACE ${OpenCV_CFLAGS_OTHER})
+
+        set(OpenCV_FOUND TRUE)
+        set(OpenCV_LIBS opencv_interface)
+      elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)
+        # Linux build: use pkg-config for OpenCV
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(OpenCV QUIET opencv4)
+        if(NOT OpenCV_FOUND)
+          pkg_check_modules(OpenCV REQUIRED opencv)
+        endif()
+
+        # Prefer the locally built static OpenCV archives when available.
+        # This avoids accidentally resolving against stray system/shared OpenCV
+        # runtimes with a different ABI version at load time.
+        set(OPENCV_LOCAL_CORE_A \"/usr/local/lib/libopencv_core.a\")
+        set(OPENCV_LOCAL_IMGPROC_A \"/usr/local/lib/libopencv_imgproc.a\")
+        if(EXISTS \"${OPENCV_LOCAL_CORE_A}\" AND EXISTS \"${OPENCV_LOCAL_IMGPROC_A}\")
+          message(STATUS \"Using explicit local static OpenCV archives for ZXing\")
+          set(OpenCV_LIBRARIES
+            \"${OPENCV_LOCAL_IMGPROC_A}\"
+            \"${OPENCV_LOCAL_CORE_A}\"
+          )
+        endif()
+
+        # Create OpenCV interface target for compatibility
+        add_library(opencv_interface INTERFACE)
+        target_include_directories(opencv_interface INTERFACE ${OpenCV_INCLUDE_DIRS})
+        target_link_directories(opencv_interface INTERFACE ${OpenCV_LIBRARY_DIRS})
+        target_link_libraries(opencv_interface INTERFACE ${OpenCV_LIBRARIES})
+        target_compile_options(opencv_interface INTERFACE ${OpenCV_CFLAGS_OTHER})
+
+        # Set variables for later use
+        set(OpenCV_FOUND TRUE)
+        set(OpenCV_LIBS opencv_interface)
+      else()
+        # Android build: use CMake configuration
+        set(OpenCV_FIND_VERSION \"4.0\")
+        set(OpenCV_SHARED ON)  # Force using shared libraries (.so) instead of static (.a)
+        set(BUILD_SHARED_LIBS ON)  # Force shared libraries globally
+      endif()"""
+
+      if needle not in src:
+        raise SystemExit('Expected OpenCV selection block not found in epoch8 core/CMakeLists.txt')
+
+      src = src.replace(needle, replacement)
+
+      # Defensive: if gapi sneaks in through OpenCV libs list, strip it from CMake text.
+      src = src.replace('opencv_gapi', '')
+
+      p.write_text(src, encoding='utf-8')
+      print('Patched', p)
+      PY
 
           export OpenCV_DIR="$(brew --prefix opencv)/lib/cmake/opencv4"
           cd ../_epoch8_zxing_cpp/wrappers/ios
-          ./build-release.sh
+            ./build-release.sh 2>&1 | tee ../../_epoch8_build.log
 
           cd ../../../barcode_scanner_flutter
           rm -rf ios/third_party/ZXingCpp.xcframework
           cp -R ../_epoch8_zxing_cpp/wrappers/ios/ZXingCpp.xcframework ios/third_party/ZXingCpp.xcframework
           find ios/third_party/ZXingCpp.xcframework -maxdepth 2 -type d -print
+
+      - name: Show epoch8 build log tail on failure
+        if: failure()
+        run: |
+          echo '--- Last 250 lines of _epoch8_build.log ---'
+          tail -n 250 ../_epoch8_build.log || true
+
+      - name: Upload epoch8 build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: epoch8-build-log
+          path: ../_epoch8_build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Verify CRPT symbols in epoch8 framework
         run: |
