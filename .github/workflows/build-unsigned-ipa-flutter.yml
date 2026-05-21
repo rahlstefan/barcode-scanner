@@ -112,34 +112,53 @@ jobs:
             --branch crpt-prod-fixed-mediapipe-10.30 \
             https://github.com/epoch8/zxing-cpp.git ../_epoch8_zxing_cpp
 
-          # Ensure wrappers/ios build script builds iOS without desktop OpenCV
-          # linkage and removes opencv_gapi from generated Xcode project.
+          # Patch core/CMakeLists.txt to skip OpenCV for iOS builds.
+          # The epoch8 fork's CMakeLists has two OpenCV paths:
+          #   - Linux  (BUILD_FOR_AARM unset): uses pkg-config — unavailable on iOS.
+          #   - Android (BUILD_FOR_AARM=ON): uses find_package with NO_DEFAULT_PATH
+          #     and OpenCV_DIR — also fails on iOS because there is no iOS OpenCV.
+          # The fix adds an iOS-specific branch that sets OpenCV_LIBS="" and skips
+          # the find_package call, so the Xcode build proceeds without OpenCV.
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          p = Path('../_epoch8_zxing_cpp/wrappers/ios/build-release.sh')
+          p = Path('../_epoch8_zxing_cpp/core/CMakeLists.txt')
           s = p.read_text(encoding='utf-8')
 
-          # Force non-desktop path in core/CMakeLists via existing condition.
-          if '-DBUILD_FOR_AARM=ON' not in s:
-            nl = '\r\n' if '\r\n' in s else '\n'
-            m = re.search(r'^\s*-DCMAKE_SYSTEM_NAME=iOS\s*\\\r?\n', s, flags=re.MULTILINE)
-            if not m:
-              raise RuntimeError('Failed to locate iOS cmake line in build-release.sh')
-            insertion = (
-              '    -DBUILD_FOR_AARM=ON \\' + nl
-            )
-            s = s[:m.end()] + insertion + s[m.end():]
-
-          inject_marker = 'echo ========= Build the sdk for simulators\n'
-          inject_block = (
-              'if [ -f _builds/ZXing.xcodeproj/project.pbxproj ]; then\n'
-              '  sed -i "" "s/opencv_gapi//g" _builds/ZXing.xcodeproj/project.pbxproj\n'
-              'fi\n\n'
-              'echo ========= Build the sdk for simulators\n'
+          # 1. Prepend an iOS guard before the Linux/Android OpenCV detection block.
+          OLD_TOP = 'if(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)\n'
+          NEW_TOP = (
+              'if(CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+              '    # iOS build: OpenCV is not required; skip detection entirely.\n'
+              '    set(OpenCV_LIBS "")\n'
+              'elseif(NOT DEFINED BUILD_FOR_AARM OR NOT BUILD_FOR_AARM)\n'
           )
-          s = s.replace(inject_marker, inject_block, 1)
+          ALREADY_PATCHED_TOP = 'set(OpenCV_LIBS "")\nelseif(NOT DEFINED BUILD_FOR_AARM'
+          if OLD_TOP in s:
+              s = s.replace(OLD_TOP, NEW_TOP, 1)
+              print('Patched: added iOS guard before Linux/Android OpenCV detection block')
+          elif ALREADY_PATCHED_TOP in s:
+              print('INFO: iOS guard already present in OpenCV detection block; skipping')
+          else:
+              print('WARN: top OpenCV detection block not found; file structure may have changed')
+
+          # 2. Guard the Android find_package(OpenCV REQUIRED) call against iOS.
+          OLD_FP = (
+              'if(DEFINED BUILD_FOR_AARM AND BUILD_FOR_AARM)\n'
+              '    find_package(OpenCV REQUIRED'
+          )
+          NEW_FP = (
+              'if(DEFINED BUILD_FOR_AARM AND BUILD_FOR_AARM AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n'
+              '    find_package(OpenCV REQUIRED'
+          )
+          ALREADY_PATCHED_FP = 'AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")\n    find_package(OpenCV REQUIRED'
+          if OLD_FP in s:
+              s = s.replace(OLD_FP, NEW_FP, 1)
+              print('Patched: guarded Android find_package(OpenCV REQUIRED) against iOS')
+          elif ALREADY_PATCHED_FP in s:
+              print('INFO: Android find_package(OpenCV) already guarded against iOS; skipping')
+          else:
+              print('WARN: Android find_package(OpenCV REQUIRED) block not found; file structure may have changed')
 
           p.write_text(s, encoding='utf-8')
           print('Patched', p)
