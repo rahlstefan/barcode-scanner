@@ -53,8 +53,16 @@ jobs:
 
       - name: Restore custom iOS overrides on top of scaffolding
         run: |
-          # Overlay AppDelegate.swift from our stash (do NOT touch generated Podfile).
+          # Overlay native iOS customizations from our stash (do NOT touch generated Podfile).
           cp ../_overrides/ios/Runner/AppDelegate.swift ios/Runner/AppDelegate.swift
+          if [ -d ../_overrides/ios/CRPTBridge ]; then
+            rm -rf ios/CRPTBridge
+            cp -R ../_overrides/ios/CRPTBridge ios/CRPTBridge
+          fi
+          if [ -d ../_overrides/ios/third_party ]; then
+            rm -rf ios/third_party
+            cp -R ../_overrides/ios/third_party ios/third_party
+          fi
           ls ios/Runner
 
       - name: Patch Info.plist (camera permission + portrait only)

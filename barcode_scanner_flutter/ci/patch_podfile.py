@@ -51,16 +51,21 @@ if "TensorFlowLiteSwift" not in src:
         sys.exit(2)
     src = new_src
 
-# 3. Add ZXingObjC pod inside Runner target.
-if "ZXingObjC" not in src:
+# 3. Add epoch8 bridge selection block after TensorFlowLiteSwift.
+if "CRPTZXBridge" not in src and "ZXingObjC" not in src:
     new_src, n = re.subn(
         r"(pod 'TensorFlowLiteSwift'[^\n]*\n)",
-        r"\1  pod 'ZXingObjC', '~> 3.6'\n",
+        "\\1"
+        "  if File.exist?(File.join(__dir__, 'third_party', 'ZXingCpp.xcframework'))\n"
+        "    pod 'CRPTZXBridge', :path => 'CRPTBridge'\n"
+        "  else\n"
+        "    pod 'ZXingObjC', '~> 3.6'\n"
+        "  end\n",
         src,
         count=1,
     )
     if n == 0:
-        sys.stderr.write("WARNING: could not add ZXingObjC pod automatically\n")
+        sys.stderr.write("WARNING: could not add CRPTZXBridge/ZXingObjC pod block automatically\n")
     else:
         src = new_src
 

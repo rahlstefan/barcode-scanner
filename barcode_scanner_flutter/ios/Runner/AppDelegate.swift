@@ -3,7 +3,11 @@ import Flutter
 import AVFoundation
 import TensorFlowLite
 import Accelerate
+#if canImport(CRPTZXBridge)
+import CRPTZXBridge
+#elseif canImport(ZXingObjC)
 import ZXingObjC
+#endif
 
 // =====================================================================
 //  Barcode Scanner — native iOS layer
@@ -530,31 +534,43 @@ class CameraPreviewView: NSObject, FlutterPlatformView,
 // ---------------------------------------------------------------------
 
 // ---------------------------------------------------------------------
-// MARK: - Barcode Decoder (ZXingObjC)
-//
-//  Pipeline: YOLO bbox (normalized 0..1 in center-square of camera frame)
-//            → crop BGRA pixel buffer → ZXingObjC format-specific reader
-//
-//  Classes from YOLO:  0 = datamatrix, 1 = code128, 2 = pdf417
+// MARK: - Barcode Decoder backend selector
 // ---------------------------------------------------------------------
 
-private final class BarcodeDecoder {
-  // Format-specific readers — more reliable than ZXMultiFormatReader + hints
-  // because YOLO has already told us the barcode class.
+private protocol BarcodeDecodingBackend {
+  func decode(
+    pixelBuffer: CVPixelBuffer,
+    x1: Float, y1: Float, x2: Float, y2: Float,
+    cls: Int
+  ) -> String?
+}
+
+#if canImport(CRPTZXBridge)
+private final class Epoch8Backend: BarcodeDecodingBackend {
+  func decode(
+    pixelBuffer: CVPixelBuffer,
+    x1: Float, y1: Float, x2: Float, y2: Float,
+    cls: Int
+  ) -> String? {
+    return CRPTZXBridge.decode(inPixelBuffer: pixelBuffer,
+                               x1: x1, y1: y1, x2: x2, y2: y2,
+                               cls: cls)
+  }
+}
+#endif
+
+#if canImport(ZXingObjC)
+private final class ZXingObjCBackend: BarcodeDecodingBackend {
   private let dmReader      = ZXDataMatrixReader()
   private let code128Reader = ZXCode128Reader()
   private let pdf417Reader  = ZXPDF417Reader()
 
   private let dmHints: ZXDecodeHints = {
-    // `ZXDecodeHints.hints()` can be imported inconsistently across Swift/Xcode
-    // versions; direct init is stable and equivalent for our use case.
     let h = ZXDecodeHints()
     h.tryHarder = true
     return h
   }()
 
-  /// Decode the barcode in the YOLO-normalized bbox from a BGRA pixel buffer.
-  /// Returns decoded text, or nil when ZXing cannot find a barcode.
   func decode(
     pixelBuffer: CVPixelBuffer,
     x1: Float, y1: Float, x2: Float, y2: Float,
@@ -568,11 +584,11 @@ private final class BarcodeDecoder {
 
     let result: ZXResult?
     switch cls {
-    case 0:  // datamatrix
+    case 0:
       result = dmReader.decode(bitmap, hints: dmHints)
-    case 1:  // code128
+    case 1:
       result = code128Reader.decode(bitmap, hints: nil)
-    case 2:  // pdf417
+    case 2:
       result = pdf417Reader.decode(bitmap, hints: nil)
     default:
       return nil
@@ -580,8 +596,6 @@ private final class BarcodeDecoder {
     return result?.text
   }
 
-  /// Extracts the bbox crop as a BGRA CGImage.
-  /// YOLO normalized coords (0..1) map to the center-square crop of the camera frame.
   private func cropToCGImage(
     _ pb: CVPixelBuffer,
     x1: Float, y1: Float, x2: Float, y2: Float
@@ -594,7 +608,6 @@ private final class BarcodeDecoder {
     let stride = CVPixelBufferGetBytesPerRow(pb)
     guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
 
-    // Same center-square crop geometry as preprocess() in YoloDetector.
     let side = min(pbW, pbH)
     let xOff = (pbW - side) / 2
     let yOff = (pbH - side) / 2
@@ -610,8 +623,6 @@ private final class BarcodeDecoder {
 
     let cropW = cx2 - cx1
     let cropH = cy2 - cy1
-
-    // Copy BGRA rows into a CFData-backed contiguous buffer.
     var bytes = [UInt8](repeating: 0, count: cropW * cropH * 4)
     bytes.withUnsafeMutableBytes { dst in
       let dstBase = dst.baseAddress!
@@ -625,8 +636,6 @@ private final class BarcodeDecoder {
     }
     let cfData = Data(bytes) as CFData
     guard let provider = CGDataProvider(data: cfData) else { return nil }
-
-    // BGRA CGImage — ZXCGImageLuminanceSource converts to grayscale internally.
     return CGImage(
       width: cropW, height: cropH,
       bitsPerComponent: 8, bitsPerPixel: 32,
@@ -639,6 +648,32 @@ private final class BarcodeDecoder {
       decode: nil, shouldInterpolate: false,
       intent: .defaultIntent
     )
+  }
+}
+#endif
+
+private final class BarcodeDecoder {
+  private let backend: BarcodeDecodingBackend?
+
+  init() {
+#if canImport(CRPTZXBridge)
+    backend = Epoch8Backend()
+    dlog("barcode backend: epoch8 zxing-cpp (CRPTZXBridge)")
+#elseif canImport(ZXingObjC)
+    backend = ZXingObjCBackend()
+    dlog("barcode backend: ZXingObjC fallback")
+#else
+    backend = nil
+    dlog("barcode backend: NONE")
+#endif
+  }
+
+  func decode(
+    pixelBuffer: CVPixelBuffer,
+    x1: Float, y1: Float, x2: Float, y2: Float,
+    cls: Int
+  ) -> String? {
+    return backend?.decode(pixelBuffer: pixelBuffer, x1: x1, y1: y1, x2: x2, y2: y2, cls: cls)
   }
 }
 

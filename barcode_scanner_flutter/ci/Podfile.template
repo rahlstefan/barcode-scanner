@@ -36,7 +36,14 @@ target 'Runner' do
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 
   pod 'TensorFlowLiteSwift', '~> 2.14.0'
-  pod 'ZXingObjC', '~> 3.6'
+
+  # Prefer epoch8 zxing-cpp bridge when vendored xcframework is available.
+  # Fallback to ZXingObjC to keep local builds working until the framework is present.
+  if File.exist?(File.join(__dir__, 'third_party', 'ZXingCpp.xcframework'))
+    pod 'CRPTZXBridge', :path => 'CRPTBridge'
+  else
+    pod 'ZXingObjC', '~> 3.6'
+  end
 
   target 'RunnerTests' do
     inherit! :search_paths
