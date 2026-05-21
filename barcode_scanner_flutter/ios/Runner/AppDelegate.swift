@@ -566,15 +566,14 @@ private final class BarcodeDecoder {
     guard let source = ZXCGImageLuminanceSource(cgImage: cgImage) else { return nil }
     let bitmap = ZXBinaryBitmap(binarizer: ZXHybridBinarizer(source: source))
 
-    var zxError: NSError?
     let result: ZXResult?
     switch cls {
     case 0:  // datamatrix
-      result = dmReader.decode(bitmap, hints: dmHints, error: &zxError)
+      result = dmReader.decode(bitmap, hints: dmHints)
     case 1:  // code128
-      result = code128Reader.decode(bitmap, hints: nil, error: &zxError)
+      result = code128Reader.decode(bitmap, hints: nil)
     case 2:  // pdf417
-      result = pdf417Reader.decode(bitmap, hints: nil, error: &zxError)
+      result = pdf417Reader.decode(bitmap, hints: nil)
     default:
       return nil
     }
