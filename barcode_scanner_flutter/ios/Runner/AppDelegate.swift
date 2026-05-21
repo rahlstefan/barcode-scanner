@@ -546,7 +546,9 @@ private final class BarcodeDecoder {
   private let pdf417Reader  = ZXPDF417Reader()
 
   private let dmHints: ZXDecodeHints = {
-    let h = ZXDecodeHints.hints() as! ZXDecodeHints
+    // `ZXDecodeHints.hints()` can be imported inconsistently across Swift/Xcode
+    // versions; direct init is stable and equivalent for our use case.
+    let h = ZXDecodeHints()
     h.tryHarder = true
     return h
   }()

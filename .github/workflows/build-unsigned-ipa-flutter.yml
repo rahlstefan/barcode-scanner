@@ -103,7 +103,23 @@ jobs:
 
       - name: Build iOS (no codesign)
         run: |
-          flutter build ios --release --no-codesign --verbose
+          set -o pipefail
+          flutter build ios --release --no-codesign --verbose 2>&1 | tee build_ios.log
+
+      - name: Show iOS build log tail on failure
+        if: failure()
+        run: |
+          echo '--- Last 250 lines of build_ios.log ---'
+          tail -n 250 build_ios.log || true
+
+      - name: Upload iOS build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-ios-build-log
+          path: barcode_scanner_flutter/build_ios.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Repackage as unsigned .ipa
         run: |
